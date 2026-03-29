@@ -1,0 +1,15 @@
+.{
+    .fingerprint = 0x331bcff037888364,
+    .name = .zig_mupdf,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.13.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+        "tests",
+        ".context/mupdf",
+    },
+}

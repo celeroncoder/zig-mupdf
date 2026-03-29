@@ -1,0 +1,33 @@
+# Zig build artifacts
+zig-out/
+.zig-cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Temporary files
+/tmp/
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Benchmark outputs
+benchmarks/results/
+
+# Rendered test outputs
+*.png
+!/tests/fixtures/*.pdf

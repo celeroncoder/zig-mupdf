@@ -1,0 +1,6 @@
+[submodule ".context/mupdf"]
+	path = .context/mupdf
+	url = https://github.com/ArtifexSoftware/mupdf.git
+[submodule ".context/PyMuPDF"]
+	path = .context/PyMuPDF
+	url = https://github.com/pymupdf/PyMuPDF.git
