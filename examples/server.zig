@@ -1,23 +1,29 @@
-//! zig-mupdf HTTP Server
-//!
-//! A simple HTTP server exposing PDF processing endpoints.
+//! zig-mupdf HTTP Server (optimized)
 //!
 //! Usage:
-//!   zig build run-server
-//!   # Then use curl to test:
+//!   zig build run-server -Doptimize=ReleaseFast
 //!   curl http://localhost:8080/health
 //!   curl -X POST -F "file=@doc.pdf" http://localhost:8080/info
-//!   curl -X POST -F "file=@doc.pdf" -F "page=0" http://localhost:8080/text
-//!   curl -X POST -F "file=@doc.pdf" -F "page=0" -F "query=hello" http://localhost:8080/search
-//!   curl -X POST -F "file=@doc.pdf" -F "page=0" --output page.png http://localhost:8080/render
 
 const std = @import("std");
 const mupdf = @import("mupdf");
 
-const allocator = std.heap.page_allocator;
+// Use a GPA for better allocation performance than page_allocator
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+const allocator = gpa.allocator();
+
+// Global MuPDF context — initialized once, reused across all requests
+var global_ctx: ?mupdf.Context = null;
+
+fn getCtx() *mupdf.Context {
+    if (global_ctx == null) {
+        global_ctx = mupdf.Context.init() catch @panic("Failed to init MuPDF context");
+    }
+    return &global_ctx.?;
+}
 
 // ============================================
-// HTTP Server Core
+// HTTP Parsing (minimal, fast)
 // ============================================
 
 const Request = struct {
@@ -25,76 +31,7 @@ const Request = struct {
     path: []const u8,
     body: []const u8,
     content_type: []const u8,
-    raw_header: []const u8,
 };
-
-const Response = struct {
-    status: []const u8 = "200 OK",
-    content_type: []const u8 = "application/json",
-    body: []const u8 = "",
-};
-
-fn parseRequest(buf: []const u8) ?Request {
-    // Find end of headers
-    const header_end = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse return null;
-    const header_section = buf[0..header_end];
-    const body = buf[header_end + 4 ..];
-
-    // Parse request line
-    const first_line_end = std.mem.indexOf(u8, header_section, "\r\n") orelse return null;
-    const request_line = header_section[0..first_line_end];
-
-    // METHOD PATH HTTP/1.x
-    var parts = std.mem.splitScalar(u8, request_line, ' ');
-    const method = parts.next() orelse return null;
-    const path = parts.next() orelse return null;
-
-    // Find Content-Type header
-    var content_type: []const u8 = "";
-    var lines = std.mem.splitSequence(u8, header_section, "\r\n");
-    while (lines.next()) |line| {
-        if (std.ascii.startsWithIgnoreCase(line, "content-type:")) {
-            content_type = std.mem.trim(u8, line["content-type:".len..], " ");
-            break;
-        }
-    }
-
-    return Request{
-        .method = method,
-        .path = path,
-        .body = body,
-        .content_type = content_type,
-        .raw_header = header_section,
-    };
-}
-
-fn sendResponse(stream: std.net.Stream, response: Response) void {
-    var header_buf: [1024]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n", .{
-        response.status,
-        response.content_type,
-        response.body.len,
-    }) catch return;
-
-    _ = stream.write(header) catch return;
-    if (response.body.len > 0) {
-        _ = stream.write(response.body) catch return;
-    }
-}
-
-fn sendError(stream: std.net.Stream, status: []const u8, message: []const u8) void {
-    var buf: [512]u8 = undefined;
-    const body = std.fmt.bufPrint(&buf, "{{\"error\":\"{s}\"}}", .{message}) catch return;
-    sendResponse(stream, .{
-        .status = status,
-        .content_type = "application/json",
-        .body = body,
-    });
-}
-
-// ============================================
-// Multipart Form Parser
-// ============================================
 
 const FormData = struct {
     file_data: ?[]const u8 = null,
@@ -103,60 +40,114 @@ const FormData = struct {
     scale: f32 = 1.0,
 };
 
+fn parseRequest(buf: []const u8) ?Request {
+    const header_end = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse return null;
+    const header = buf[0..header_end];
+    const body = buf[header_end + 4 ..];
+
+    const line_end = std.mem.indexOf(u8, header, "\r\n") orelse return null;
+    const request_line = header[0..line_end];
+
+    var parts = std.mem.splitScalar(u8, request_line, ' ');
+    const method = parts.next() orelse return null;
+    const path = parts.next() orelse return null;
+
+    var content_type: []const u8 = "";
+    var lines = std.mem.splitSequence(u8, header, "\r\n");
+    while (lines.next()) |line| {
+        if (std.ascii.startsWithIgnoreCase(line, "content-type:")) {
+            content_type = std.mem.trim(u8, line["content-type:".len..], " ");
+            break;
+        }
+    }
+
+    return .{ .method = method, .path = path, .body = body, .content_type = content_type };
+}
+
+fn getContentLength(buf: []const u8) usize {
+    const header_end = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse return 0;
+    const header = buf[0..header_end];
+    var lines = std.mem.splitSequence(u8, header, "\r\n");
+    while (lines.next()) |line| {
+        if (std.ascii.startsWithIgnoreCase(line, "content-length:")) {
+            const val = std.mem.trim(u8, line["content-length:".len..], " ");
+            return std.fmt.parseInt(usize, val, 10) catch 0;
+        }
+    }
+    return 0;
+}
+
 fn parseMultipart(content_type: []const u8, body: []const u8) FormData {
     var result = FormData{};
 
-    // Extract boundary from content-type
     const boundary_prefix = "boundary=";
     const boundary_start = std.mem.indexOf(u8, content_type, boundary_prefix) orelse return result;
-    var boundary_value = content_type[boundary_start + boundary_prefix.len ..];
-    // Remove quotes if present
-    if (boundary_value.len > 0 and boundary_value[0] == '"') {
-        boundary_value = boundary_value[1..];
-        if (std.mem.indexOf(u8, boundary_value, "\"")) |end| {
-            boundary_value = boundary_value[0..end];
-        }
+    var bv = content_type[boundary_start + boundary_prefix.len ..];
+    if (bv.len > 0 and bv[0] == '"') {
+        bv = bv[1..];
+        if (std.mem.indexOf(u8, bv, "\"")) |end| bv = bv[0..end];
     }
 
-    // Build delimiter: "--" + boundary
     var delim_buf: [256]u8 = undefined;
-    const delim = std.fmt.bufPrint(&delim_buf, "--{s}", .{boundary_value}) catch return result;
+    const delim = std.fmt.bufPrint(&delim_buf, "--{s}", .{bv}) catch return result;
 
-    // Split by boundary
-    var parts = std.mem.splitSequence(u8, body, delim);
-    while (parts.next()) |part| {
+    var parts_iter = std.mem.splitSequence(u8, body, delim);
+    while (parts_iter.next()) |part| {
         if (part.len < 4) continue;
-        // Skip leading \r\n
         const trimmed = if (std.mem.startsWith(u8, part, "\r\n")) part[2..] else part;
-
-        // Find header/body separator
         const sep = std.mem.indexOf(u8, trimmed, "\r\n\r\n") orelse continue;
-        const part_header = trimmed[0..sep];
-        const part_body = trimmed[sep + 4 ..];
+        const ph = trimmed[0..sep];
+        const pb = trimmed[sep + 4 ..];
+        const cb = if (pb.len >= 2 and std.mem.endsWith(u8, pb, "\r\n")) pb[0 .. pb.len - 2] else pb;
 
-        // Remove trailing \r\n from body
-        const clean_body = if (part_body.len >= 2 and std.mem.endsWith(u8, part_body, "\r\n"))
-            part_body[0 .. part_body.len - 2]
-        else
-            part_body;
-
-        // Check field name
-        if (std.mem.indexOf(u8, part_header, "name=\"file\"") != null) {
-            result.file_data = clean_body;
-        } else if (std.mem.indexOf(u8, part_header, "name=\"page\"") != null) {
-            result.page = std.fmt.parseInt(i32, std.mem.trim(u8, clean_body, " \r\n"), 10) catch 0;
-        } else if (std.mem.indexOf(u8, part_header, "name=\"query\"") != null) {
-            result.query = clean_body;
-        } else if (std.mem.indexOf(u8, part_header, "name=\"scale\"") != null) {
-            result.scale = std.fmt.parseFloat(f32, std.mem.trim(u8, clean_body, " \r\n")) catch 1.0;
+        if (std.mem.indexOf(u8, ph, "name=\"file\"") != null) {
+            result.file_data = cb;
+        } else if (std.mem.indexOf(u8, ph, "name=\"page\"") != null) {
+            result.page = std.fmt.parseInt(i32, std.mem.trim(u8, cb, " \r\n"), 10) catch 0;
+        } else if (std.mem.indexOf(u8, ph, "name=\"query\"") != null) {
+            result.query = cb;
+        } else if (std.mem.indexOf(u8, ph, "name=\"scale\"") != null) {
+            result.scale = std.fmt.parseFloat(f32, std.mem.trim(u8, cb, " \r\n")) catch 1.0;
         }
     }
-
     return result;
 }
 
 // ============================================
-// JSON Helpers
+// Response helpers
+// ============================================
+
+fn sendFull(stream: std.net.Stream, status: []const u8, ctype: []const u8, body: []const u8) void {
+    // Build header + body into one buffer for a single write syscall
+    const header_max = 256;
+    const total = header_max + body.len;
+    const buf = allocator.alloc(u8, total) catch {
+        // Fallback: two writes
+        var hb: [256]u8 = undefined;
+        const h = std.fmt.bufPrint(&hb, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n", .{ status, ctype, body.len }) catch return;
+        _ = stream.write(h) catch return;
+        if (body.len > 0) _ = stream.write(body) catch return;
+        return;
+    };
+    defer allocator.free(buf);
+
+    const hlen = std.fmt.bufPrint(buf[0..header_max], "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n", .{ status, ctype, body.len }) catch return;
+    @memcpy(buf[hlen.len .. hlen.len + body.len], body);
+    _ = stream.write(buf[0 .. hlen.len + body.len]) catch return;
+}
+
+fn sendJson(stream: std.net.Stream, body: []const u8) void {
+    sendFull(stream, "200 OK", "application/json", body);
+}
+
+fn sendError(stream: std.net.Stream, status: []const u8, msg: []const u8) void {
+    var buf: [512]u8 = undefined;
+    const body = std.fmt.bufPrint(&buf, "{{\"error\":\"{s}\"}}", .{msg}) catch return;
+    sendFull(stream, status, "application/json", body);
+}
+
+// ============================================
+// JSON helpers
 // ============================================
 
 fn jsonEscape(input: []const u8, buf: []u8) []const u8 {
@@ -164,39 +155,12 @@ fn jsonEscape(input: []const u8, buf: []u8) []const u8 {
     for (input) |ch| {
         if (i + 6 >= buf.len) break;
         switch (ch) {
-            '"' => {
-                buf[i] = '\\';
-                buf[i + 1] = '"';
-                i += 2;
-            },
-            '\\' => {
-                buf[i] = '\\';
-                buf[i + 1] = '\\';
-                i += 2;
-            },
-            '\n' => {
-                buf[i] = '\\';
-                buf[i + 1] = 'n';
-                i += 2;
-            },
-            '\r' => {
-                buf[i] = '\\';
-                buf[i + 1] = 'r';
-                i += 2;
-            },
-            '\t' => {
-                buf[i] = '\\';
-                buf[i + 1] = 't';
-                i += 2;
-            },
-            else => {
-                if (ch < 0x20) {
-                    // Skip control characters
-                } else {
-                    buf[i] = ch;
-                    i += 1;
-                }
-            },
+            '"' => { buf[i] = '\\'; buf[i + 1] = '"'; i += 2; },
+            '\\' => { buf[i] = '\\'; buf[i + 1] = '\\'; i += 2; },
+            '\n' => { buf[i] = '\\'; buf[i + 1] = 'n'; i += 2; },
+            '\r' => { buf[i] = '\\'; buf[i + 1] = 'r'; i += 2; },
+            '\t' => { buf[i] = '\\'; buf[i + 1] = 't'; i += 2; },
+            else => if (ch >= 0x20) { buf[i] = ch; i += 1; },
         }
     }
     return buf[0..i];
@@ -207,351 +171,252 @@ fn jsonEscape(input: []const u8, buf: []u8) []const u8 {
 // ============================================
 
 fn handleHealth(stream: std.net.Stream) void {
-    sendResponse(stream, .{
-        .body = "{\"status\":\"ok\",\"service\":\"zig-mupdf\"}",
-    });
+    sendJson(stream, "{\"status\":\"ok\",\"service\":\"zig-mupdf\"}");
 }
 
 fn handleInfo(stream: std.net.Stream, form: FormData) void {
     const file_data = form.file_data orelse {
-        sendError(stream, "400 Bad Request", "No file uploaded. Use: curl -F file=@doc.pdf ...");
+        sendError(stream, "400 Bad Request", "No file uploaded");
         return;
     };
 
-    var ctx = mupdf.Context.init() catch {
-        sendError(stream, "500 Internal Server Error", "Failed to init MuPDF context");
-        return;
-    };
-    defer ctx.deinit();
-
-    var doc = mupdf.Document.openFromMemory(&ctx, file_data, "application/pdf") catch {
+    const ctx = getCtx();
+    var doc = mupdf.Document.openFromMemory(ctx, file_data, "application/pdf") catch {
         sendError(stream, "400 Bad Request", "Failed to open PDF");
         return;
     };
     defer doc.deinit();
 
     const page_count = doc.pageCount();
-    const is_pdf = doc.isPdf();
-    const needs_password = doc.needsPassword();
-
-    // Get metadata
-    var title_esc_buf: [2048]u8 = undefined;
-    var author_esc_buf: [2048]u8 = undefined;
-    var subject_esc_buf: [2048]u8 = undefined;
-    var creator_esc_buf: [2048]u8 = undefined;
-    var producer_esc_buf: [2048]u8 = undefined;
-    var format_esc_buf: [256]u8 = undefined;
 
     var metadata = doc.getAllMetadata(allocator) catch {
-        sendError(stream, "500 Internal Server Error", "Failed to read metadata");
+        sendError(stream, "500 Internal Server Error", "Metadata read failed");
         return;
     };
     defer metadata.deinit();
 
-    const title = if (metadata.title) |t| jsonEscape(t, &title_esc_buf) else "";
-    const author = if (metadata.author) |a| jsonEscape(a, &author_esc_buf) else "";
-    const subject = if (metadata.subject) |s| jsonEscape(s, &subject_esc_buf) else "";
-    const creator = if (metadata.creator) |c_val| jsonEscape(c_val, &creator_esc_buf) else "";
-    const producer = if (metadata.producer) |p| jsonEscape(p, &producer_esc_buf) else "";
-    const format = if (metadata.format) |f| jsonEscape(f, &format_esc_buf) else "";
+    var esc_bufs: [6][2048]u8 = undefined;
+    const title = if (metadata.title) |t| jsonEscape(t, &esc_bufs[0]) else "";
+    const author_val = if (metadata.author) |a| jsonEscape(a, &esc_bufs[1]) else "";
+    const subject = if (metadata.subject) |s| jsonEscape(s, &esc_bufs[2]) else "";
+    const creator_val = if (metadata.creator) |cv| jsonEscape(cv, &esc_bufs[3]) else "";
+    const producer = if (metadata.producer) |p| jsonEscape(p, &esc_bufs[4]) else "";
+    const format = if (metadata.format) |f| jsonEscape(f, &esc_bufs[5]) else "";
 
-    // Build page dimensions
-    var pages_json_buf: [8192]u8 = undefined;
-    var pages_len: usize = 0;
-    pages_json_buf[0] = '[';
-    pages_len = 1;
+    // Pages array
+    var pages_buf: [16384]u8 = undefined;
+    var pl: usize = 1;
+    pages_buf[0] = '[';
 
-    const pages_to_show: i32 = @min(page_count, 50);
+    const show: i32 = @min(page_count, 50);
     var i: i32 = 0;
-    while (i < pages_to_show) : (i += 1) {
+    while (i < show) : (i += 1) {
         var page = doc.loadPage(i) catch continue;
         defer page.deinit();
-
-        const w = page.width();
-        const h = page.height();
-        const rot = page.rotation();
-
-        if (i > 0) {
-            pages_json_buf[pages_len] = ',';
-            pages_len += 1;
-        }
-
-        const entry = std.fmt.bufPrint(pages_json_buf[pages_len..], "{{\"page\":{d},\"width\":{d:.1},\"height\":{d:.1},\"rotation\":{d}}}", .{ i, w, h, rot }) catch break;
-        pages_len += entry.len;
+        if (i > 0) { pages_buf[pl] = ','; pl += 1; }
+        const e = std.fmt.bufPrint(pages_buf[pl..], "{{\"page\":{d},\"width\":{d:.1},\"height\":{d:.1},\"rotation\":{d}}}", .{ i, page.width(), page.height(), page.rotation() }) catch break;
+        pl += e.len;
     }
-    pages_json_buf[pages_len] = ']';
-    pages_len += 1;
+    pages_buf[pl] = ']';
+    pl += 1;
 
-    // Build response
-    var response_buf: [16384]u8 = undefined;
-    const body = std.fmt.bufPrint(&response_buf, "{{\"page_count\":{d},\"is_pdf\":{},\"needs_password\":{},\"format\":\"{s}\",\"title\":\"{s}\",\"author\":\"{s}\",\"subject\":\"{s}\",\"creator\":\"{s}\",\"producer\":\"{s}\",\"pages\":{s}}}", .{
-        page_count,
-        is_pdf,
-        needs_password,
-        format,
-        title,
-        author,
-        subject,
-        creator,
-        producer,
-        pages_json_buf[0..pages_len],
-    }) catch {
-        sendError(stream, "500 Internal Server Error", "Response too large");
-        return;
-    };
+    var resp_buf: [32768]u8 = undefined;
+    const body = std.fmt.bufPrint(&resp_buf, "{{\"page_count\":{d},\"is_pdf\":{},\"needs_password\":{},\"format\":\"{s}\",\"title\":\"{s}\",\"author\":\"{s}\",\"subject\":\"{s}\",\"creator\":\"{s}\",\"producer\":\"{s}\",\"pages\":{s}}}", .{
+        page_count, doc.isPdf(), doc.needsPassword(), format, title, author_val, subject, creator_val, producer, pages_buf[0..pl],
+    }) catch { sendError(stream, "500 Internal Server Error", "Response too large"); return; };
 
-    sendResponse(stream, .{ .body = body });
+    sendJson(stream, body);
 }
 
 fn handleText(stream: std.net.Stream, form: FormData) void {
-    const file_data = form.file_data orelse {
-        sendError(stream, "400 Bad Request", "No file uploaded");
-        return;
-    };
+    const file_data = form.file_data orelse { sendError(stream, "400 Bad Request", "No file"); return; };
+    const ctx = getCtx();
 
-    var ctx = mupdf.Context.init() catch {
-        sendError(stream, "500 Internal Server Error", "Failed to init MuPDF context");
-        return;
-    };
-    defer ctx.deinit();
-
-    var doc = mupdf.Document.openFromMemory(&ctx, file_data, "application/pdf") catch {
-        sendError(stream, "400 Bad Request", "Failed to open PDF");
-        return;
+    var doc = mupdf.Document.openFromMemory(ctx, file_data, "application/pdf") catch {
+        sendError(stream, "400 Bad Request", "Failed to open PDF"); return;
     };
     defer doc.deinit();
 
     if (form.page < 0 or form.page >= doc.pageCount()) {
-        sendError(stream, "400 Bad Request", "Page number out of range");
-        return;
+        sendError(stream, "400 Bad Request", "Page out of range"); return;
     }
 
-    var page = doc.loadPage(form.page) catch {
-        sendError(stream, "500 Internal Server Error", "Failed to load page");
-        return;
-    };
+    var page = doc.loadPage(form.page) catch { sendError(stream, "500 Internal Server Error", "Load page failed"); return; };
     defer page.deinit();
 
-    const text = page.getText(allocator) catch {
-        sendError(stream, "500 Internal Server Error", "Failed to extract text");
-        return;
-    };
+    const text = page.getText(allocator) catch { sendError(stream, "500 Internal Server Error", "Text extraction failed"); return; };
     defer allocator.free(text);
 
-    // Escape text for JSON
-    const escaped_buf = allocator.alloc(u8, text.len * 2 + 1) catch {
-        sendError(stream, "500 Internal Server Error", "Out of memory");
-        return;
-    };
-    defer allocator.free(escaped_buf);
-    const escaped = jsonEscape(text, escaped_buf);
+    const esc_buf = allocator.alloc(u8, text.len * 2 + 1) catch { sendError(stream, "500 Internal Server Error", "OOM"); return; };
+    defer allocator.free(esc_buf);
+    const escaped = jsonEscape(text, esc_buf);
 
-    // Build response
-    const prefix = std.fmt.allocPrint(allocator, "{{\"page\":{d},\"text\":\"", .{form.page}) catch {
-        sendError(stream, "500 Internal Server Error", "Out of memory");
-        return;
-    };
+    const prefix = std.fmt.allocPrint(allocator, "{{\"page\":{d},\"text\":\"", .{form.page}) catch { sendError(stream, "500 Internal Server Error", "OOM"); return; };
     defer allocator.free(prefix);
-
     const suffix = "\"}";
-    const total_len = prefix.len + escaped.len + suffix.len;
-    const body = allocator.alloc(u8, total_len) catch {
-        sendError(stream, "500 Internal Server Error", "Out of memory");
-        return;
-    };
-    defer allocator.free(body);
 
+    const body = allocator.alloc(u8, prefix.len + escaped.len + suffix.len) catch { sendError(stream, "500 Internal Server Error", "OOM"); return; };
+    defer allocator.free(body);
     @memcpy(body[0..prefix.len], prefix);
     @memcpy(body[prefix.len .. prefix.len + escaped.len], escaped);
     @memcpy(body[prefix.len + escaped.len ..], suffix);
 
-    sendResponse(stream, .{ .body = body });
+    sendJson(stream, body);
 }
 
 fn handleSearch(stream: std.net.Stream, form: FormData) void {
-    const file_data = form.file_data orelse {
-        sendError(stream, "400 Bad Request", "No file uploaded");
-        return;
-    };
-    const query = form.query orelse {
-        sendError(stream, "400 Bad Request", "No query provided. Use: -F query=searchterm");
-        return;
-    };
+    const file_data = form.file_data orelse { sendError(stream, "400 Bad Request", "No file"); return; };
+    const query = form.query orelse { sendError(stream, "400 Bad Request", "No query"); return; };
+    const ctx = getCtx();
 
-    var ctx = mupdf.Context.init() catch {
-        sendError(stream, "500 Internal Server Error", "Failed to init MuPDF context");
-        return;
-    };
-    defer ctx.deinit();
-
-    var doc = mupdf.Document.openFromMemory(&ctx, file_data, "application/pdf") catch {
-        sendError(stream, "400 Bad Request", "Failed to open PDF");
-        return;
-    };
+    var doc = mupdf.Document.openFromMemory(ctx, file_data, "application/pdf") catch { sendError(stream, "400 Bad Request", "Failed to open PDF"); return; };
     defer doc.deinit();
 
-    if (form.page < 0 or form.page >= doc.pageCount()) {
-        sendError(stream, "400 Bad Request", "Page number out of range");
-        return;
-    }
+    if (form.page < 0 or form.page >= doc.pageCount()) { sendError(stream, "400 Bad Request", "Page out of range"); return; }
 
-    var page = doc.loadPage(form.page) catch {
-        sendError(stream, "500 Internal Server Error", "Failed to load page");
-        return;
-    };
+    var page = doc.loadPage(form.page) catch { sendError(stream, "500 Internal Server Error", "Load failed"); return; };
     defer page.deinit();
 
-    const hits = page.search(query, allocator) catch {
-        sendError(stream, "500 Internal Server Error", "Search failed");
-        return;
-    };
+    const hits = page.search(query, allocator) catch { sendError(stream, "500 Internal Server Error", "Search failed"); return; };
     defer allocator.free(hits);
 
-    // Build JSON response
     var buf: [32768]u8 = undefined;
     var len: usize = 0;
+    var qesc: [1024]u8 = undefined;
+    const qe = jsonEscape(query, &qesc);
+    const hdr = std.fmt.bufPrint(buf[0..], "{{\"page\":{d},\"query\":\"{s}\",\"hit_count\":{d},\"hits\":[", .{ form.page, qe, hits.len }) catch { sendError(stream, "500 Internal Server Error", "Response too large"); return; };
+    len = hdr.len;
 
-    var query_esc_buf: [1024]u8 = undefined;
-    const query_escaped = jsonEscape(query, &query_esc_buf);
-
-    const header = std.fmt.bufPrint(buf[len..], "{{\"page\":{d},\"query\":\"{s}\",\"hit_count\":{d},\"hits\":[", .{ form.page, query_escaped, hits.len }) catch {
-        sendError(stream, "500 Internal Server Error", "Response too large");
-        return;
-    };
-    len += header.len;
-
-    for (hits, 0..) |hit, i| {
-        if (i > 0) {
-            buf[len] = ',';
-            len += 1;
-        }
-        const rect = hit.quad.toRect();
-        const entry = std.fmt.bufPrint(buf[len..], "{{\"x\":{d:.1},\"y\":{d:.1},\"width\":{d:.1},\"height\":{d:.1}}}", .{ rect.x0, rect.y0, rect.width(), rect.height() }) catch break;
-        len += entry.len;
+    for (hits, 0..) |hit, idx| {
+        if (idx > 0) { buf[len] = ','; len += 1; }
+        const r = hit.quad.toRect();
+        const e = std.fmt.bufPrint(buf[len..], "{{\"x\":{d:.1},\"y\":{d:.1},\"width\":{d:.1},\"height\":{d:.1}}}", .{ r.x0, r.y0, r.width(), r.height() }) catch break;
+        len += e.len;
     }
+    @memcpy(buf[len .. len + 2], "]}");
+    len += 2;
 
-    const footer = "]}";
-    @memcpy(buf[len .. len + footer.len], footer);
-    len += footer.len;
-
-    sendResponse(stream, .{ .body = buf[0..len] });
+    sendJson(stream, buf[0..len]);
 }
 
 fn handleRender(stream: std.net.Stream, form: FormData) void {
-    const file_data = form.file_data orelse {
-        sendError(stream, "400 Bad Request", "No file uploaded");
-        return;
-    };
+    const file_data = form.file_data orelse { sendError(stream, "400 Bad Request", "No file"); return; };
+    const ctx = getCtx();
 
-    var ctx = mupdf.Context.init() catch {
-        sendError(stream, "500 Internal Server Error", "Failed to init MuPDF context");
-        return;
-    };
-    defer ctx.deinit();
+    var timer = std.time.Timer.start() catch unreachable;
 
-    var doc = mupdf.Document.openFromMemory(&ctx, file_data, "application/pdf") catch {
-        sendError(stream, "400 Bad Request", "Failed to open PDF");
-        return;
-    };
+    var doc = mupdf.Document.openFromMemory(ctx, file_data, "application/pdf") catch { sendError(stream, "400 Bad Request", "Failed to open PDF"); return; };
     defer doc.deinit();
+    const t_open = timer.lap();
 
-    if (form.page < 0 or form.page >= doc.pageCount()) {
-        sendError(stream, "400 Bad Request", "Page number out of range");
-        return;
-    }
+    if (form.page < 0 or form.page >= doc.pageCount()) { sendError(stream, "400 Bad Request", "Page out of range"); return; }
 
-    var page = doc.loadPage(form.page) catch {
-        sendError(stream, "500 Internal Server Error", "Failed to load page");
-        return;
-    };
+    var page = doc.loadPage(form.page) catch { sendError(stream, "500 Internal Server Error", "Load failed"); return; };
     defer page.deinit();
+    const t_load = timer.lap();
 
     const scale = if (form.scale > 0 and form.scale <= 10) form.scale else 1.0;
 
-    var pixmap = page.toPixmap(scale, 0.0) catch {
-        sendError(stream, "500 Internal Server Error", "Failed to render page");
-        return;
-    };
+    var pixmap = page.toPixmap(scale, 0.0) catch { sendError(stream, "500 Internal Server Error", "Render failed"); return; };
     defer pixmap.deinit();
+    const t_render = timer.lap();
 
-    // Save to a temp file and read it back (MuPDF's PNG writer works with files)
-    const tmp_path = "/tmp/zig-mupdf-render.png";
-    pixmap.savePng(tmp_path) catch {
-        sendError(stream, "500 Internal Server Error", "Failed to encode PNG");
-        return;
-    };
-
-    // Read the PNG file
-    const png_data = std.fs.cwd().readFileAlloc(allocator, tmp_path, 50 * 1024 * 1024) catch {
-        sendError(stream, "500 Internal Server Error", "Failed to read rendered PNG");
-        return;
-    };
+    const png_data = pixmap.toPng(allocator) catch { sendError(stream, "500 Internal Server Error", "PNG encode failed"); return; };
     defer allocator.free(png_data);
+    const t_png = timer.lap();
 
-    // Clean up temp file
-    std.fs.cwd().deleteFile(tmp_path) catch {};
+    sendFull(stream, "200 OK", "image/png", png_data);
+    const t_send = timer.lap();
 
-    sendResponse(stream, .{
-        .content_type = "image/png",
-        .body = png_data,
+    std.debug.print("  render: open={d:.1}ms load={d:.1}ms render={d:.1}ms png={d:.1}ms send={d:.1}ms total={d:.1}ms\n", .{
+        @as(f64, @floatFromInt(t_open)) / 1_000_000.0,
+        @as(f64, @floatFromInt(t_load)) / 1_000_000.0,
+        @as(f64, @floatFromInt(t_render)) / 1_000_000.0,
+        @as(f64, @floatFromInt(t_png)) / 1_000_000.0,
+        @as(f64, @floatFromInt(t_send)) / 1_000_000.0,
+        @as(f64, @floatFromInt(t_open + t_load + t_render + t_png + t_send)) / 1_000_000.0,
     });
 }
 
 // ============================================
-// Main Server
+// Connection handler
 // ============================================
 
 fn handleConnection(stream: std.net.Stream) void {
     defer stream.close();
 
-    // Read request (up to 50MB for PDF uploads)
-    const max_size = 50 * 1024 * 1024;
-    var buf = allocator.alloc(u8, max_size) catch {
-        sendError(stream, "500 Internal Server Error", "Out of memory");
-        return;
-    };
-    defer allocator.free(buf);
+    // Set socket options for fast transfer
+    const c_lib = @cImport({
+        @cInclude("sys/socket.h");
+        @cInclude("netinet/tcp.h");
+        @cInclude("netinet/in.h");
+    });
+    const fd: c_int = @intCast(stream.handle);
+    var nodelay: c_int = 1;
+    _ = c_lib.setsockopt(fd, c_lib.IPPROTO_TCP, c_lib.TCP_NODELAY, &nodelay, @sizeOf(c_int));
 
-    var total: usize = 0;
+    // Read the full request
+    // Strategy: allocate generous buffer, read continuously until we have
+    // headers + full Content-Length body. Use readAtLeast to minimize syscalls.
+    const max_request = 50 * 1024 * 1024;
 
-    // Read until we have the full request
-    // First, read headers to find Content-Length
-    while (total < max_size) {
-        const n = stream.read(buf[total..]) catch return;
-        if (n == 0) break;
-        total += n;
+    // First read: get headers
+    var hdr_buf: [4096]u8 = undefined;
+    var hdr_len: usize = 0;
+    while (hdr_len < hdr_buf.len) {
+        const n = stream.read(hdr_buf[hdr_len..]) catch return;
+        if (n == 0) return;
+        hdr_len += n;
+        if (std.mem.indexOf(u8, hdr_buf[0..hdr_len], "\r\n\r\n") != null) break;
+    }
+    if (hdr_len == 0) return;
 
-        // Check if we have complete headers
-        if (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n")) |header_end| {
-            // Look for Content-Length
-            const headers = buf[0..header_end];
-            var content_length: usize = 0;
-            var lines = std.mem.splitSequence(u8, headers, "\r\n");
-            while (lines.next()) |line| {
-                if (std.ascii.startsWithIgnoreCase(line, "content-length:")) {
-                    const val = std.mem.trim(u8, line["content-length:".len..], " ");
-                    content_length = std.fmt.parseInt(usize, val, 10) catch 0;
-                    break;
-                }
-            }
-
-            const expected_total = header_end + 4 + content_length;
-            if (total >= expected_total) break;
-
-            // Keep reading if we haven't received all the body
-            if (total >= max_size) break;
-        }
+    // Handle Expect: 100-continue — client waits for this before sending body
+    const headers_slice = hdr_buf[0..hdr_len];
+    if (std.ascii.indexOfIgnoreCase(headers_slice, "expect: 100-continue") != null or
+        std.ascii.indexOfIgnoreCase(headers_slice, "expect:100-continue") != null)
+    {
+        _ = stream.write("HTTP/1.1 100 Continue\r\n\r\n") catch {};
     }
 
-    if (total == 0) return;
+    const content_length = getContentLength(hdr_buf[0..hdr_len]);
+    const header_end_pos = std.mem.indexOf(u8, hdr_buf[0..hdr_len], "\r\n\r\n") orelse return;
+    const header_end = header_end_pos + 4;
 
-    const request = parseRequest(buf[0..total]) orelse {
+    // For requests with no/small body, use stack buffer
+    var full_buf: []u8 = undefined;
+    var owns_buf = false;
+    var total = hdr_len;
+
+    if (content_length == 0) {
+        full_buf = hdr_buf[0..hdr_len];
+    } else {
+        const expected_total = header_end + content_length;
+        if (expected_total > max_request) {
+            sendError(stream, "413 Payload Too Large", "Request too large");
+            return;
+        }
+
+        full_buf = allocator.alloc(u8, expected_total) catch {
+            sendError(stream, "500 Internal Server Error", "OOM");
+            return;
+        };
+        owns_buf = true;
+        @memcpy(full_buf[0..hdr_len], hdr_buf[0..hdr_len]);
+
+        // Read remaining body using recv(MSG_WAITALL) to avoid delayed ACK penalty
+        const remaining = expected_total - total;
+        if (remaining > 0) {
+            const rc = c_lib.recv(fd, full_buf.ptr + total, remaining, c_lib.MSG_WAITALL);
+            if (rc > 0) total += @intCast(@as(usize, @bitCast(rc)));
+        }
+    }
+    defer if (owns_buf) allocator.free(full_buf);
+
+    const request = parseRequest(full_buf[0..total]) orelse {
         sendError(stream, "400 Bad Request", "Malformed request");
         return;
     };
-
-    // Log request
-    std.debug.print("{s} {s}\n", .{ request.method, request.path });
 
     // Route
     if (std.mem.eql(u8, request.path, "/health")) {
@@ -562,21 +427,13 @@ fn handleConnection(stream: std.net.Stream) void {
         else
             FormData{ .file_data = if (request.body.len > 0) request.body else null };
 
-        if (std.mem.eql(u8, request.path, "/info")) {
-            handleInfo(stream, form);
-        } else if (std.mem.eql(u8, request.path, "/text")) {
-            handleText(stream, form);
-        } else if (std.mem.eql(u8, request.path, "/search")) {
-            handleSearch(stream, form);
-        } else if (std.mem.eql(u8, request.path, "/render")) {
-            handleRender(stream, form);
-        } else {
-            sendError(stream, "404 Not Found", "Unknown endpoint");
-        }
+        if (std.mem.eql(u8, request.path, "/info")) handleInfo(stream, form)
+        else if (std.mem.eql(u8, request.path, "/text")) handleText(stream, form)
+        else if (std.mem.eql(u8, request.path, "/search")) handleSearch(stream, form)
+        else if (std.mem.eql(u8, request.path, "/render")) handleRender(stream, form)
+        else sendError(stream, "404 Not Found", "Unknown endpoint");
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/")) {
-        sendResponse(stream, .{
-            .content_type = "text/plain",
-            .body =
+        sendFull(stream, "200 OK", "text/plain",
             \\zig-mupdf PDF Server
             \\
             \\Endpoints:
@@ -585,48 +442,38 @@ fn handleConnection(stream: std.net.Stream) void {
             \\  POST /text                Extract text (form: file, page=0)
             \\  POST /search              Search text  (form: file, page=0, query=term)
             \\  POST /render              Render PNG   (form: file, page=0, scale=2.0)
-            \\
-            \\Example:
-            \\  curl -X POST -F "file=@document.pdf" http://localhost:8080/info
-            \\  curl -X POST -F "file=@document.pdf" -F "page=0" http://localhost:8080/text
-            \\  curl -X POST -F "file=@document.pdf" -F "page=0" -F "query=hello" http://localhost:8080/search
-            \\  curl -X POST -F "file=@document.pdf" -F "page=0" -F "scale=2" -o page.png http://localhost:8080/render
-            ,
-        });
+        );
     } else {
-        sendError(stream, "404 Not Found", "Unknown endpoint. GET / for help.");
+        sendError(stream, "404 Not Found", "Unknown endpoint");
     }
 }
+
+// ============================================
+// Main
+// ============================================
 
 pub fn main() !void {
     const port: u16 = blk: {
         var args = std.process.args();
-        _ = args.skip(); // program name
-        if (args.next()) |p| {
-            break :blk std.fmt.parseInt(u16, p, 10) catch 8080;
-        }
+        _ = args.skip();
+        if (args.next()) |p| break :blk std.fmt.parseInt(u16, p, 10) catch 8080;
         break :blk 8080;
     };
 
+    // Pre-initialize MuPDF context
+    _ = getCtx();
+
     const address = std.net.Address.parseIp4("0.0.0.0", port) catch unreachable;
-    var server = address.listen(.{
-        .reuse_address = true,
-    }) catch |err| {
-        std.debug.print("Failed to bind to port {d}: {}\n", .{ port, err });
+    var server = address.listen(.{ .reuse_address = true }) catch |err| {
+        std.debug.print("Failed to bind port {d}: {}\n", .{ port, err });
         return;
     };
     defer server.deinit();
 
-    std.debug.print("\n", .{});
-    std.debug.print("  zig-mupdf server running on http://localhost:{d}\n", .{port});
-    std.debug.print("  Press Ctrl+C to stop\n", .{});
-    std.debug.print("\n", .{});
-    std.debug.print("  Try: curl http://localhost:{d}/health\n", .{port});
-    std.debug.print("       curl -X POST -F \"file=@doc.pdf\" http://localhost:{d}/info\n", .{port});
-    std.debug.print("\n", .{});
+    std.debug.print("\n  zig-mupdf server on http://localhost:{d}\n\n", .{port});
 
     while (true) {
-        const connection = server.accept() catch continue;
-        handleConnection(connection.stream);
+        const conn = server.accept() catch continue;
+        handleConnection(conn.stream);
     }
 }

@@ -97,6 +97,22 @@ fz_document *mupdf_shim_open_document_with_stream(fz_context *ctx, const char *m
     return doc;
 }
 
+fz_document *mupdf_shim_open_document_with_buffer(fz_context *ctx, const char *magic, const unsigned char *data, size_t len)
+{
+    fz_document *doc = NULL;
+    fz_try(ctx)
+    {
+        fz_buffer *buf = fz_new_buffer_from_copied_data(ctx, data, len);
+        doc = fz_open_document_with_buffer(ctx, magic, buf);
+        fz_drop_buffer(ctx, buf); /* doc keeps its own reference */
+    }
+    fz_catch(ctx)
+    {
+        doc = NULL;
+    }
+    return doc;
+}
+
 fz_page *mupdf_shim_load_page(fz_context *ctx, fz_document *doc, int page_num)
 {
     fz_page *page = NULL;
@@ -315,6 +331,21 @@ fz_pixmap *mupdf_shim_image_to_pixmap(fz_context *ctx, fz_image *image)
         pix = NULL;
     }
     return pix;
+}
+
+fz_buffer *mupdf_shim_pixmap_to_png(fz_context *ctx, fz_pixmap *pixmap)
+{
+    fz_buffer *buf = NULL;
+    fz_try(ctx)
+    {
+        fz_color_params cp = fz_default_color_params;
+        buf = fz_new_buffer_from_pixmap_as_png(ctx, pixmap, cp);
+    }
+    fz_catch(ctx)
+    {
+        buf = NULL;
+    }
+    return buf;
 }
 
 int mupdf_shim_image_width(fz_image *img) { return img ? img->w : 0; }

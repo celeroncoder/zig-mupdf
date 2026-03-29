@@ -321,13 +321,6 @@ pub const Document = struct {
 
     /// Open a document from memory.
     pub fn openFromMemory(ctx: *Context, data: []const u8, magic: []const u8) Error!Self {
-        // Create a stream from the data
-        const stream = c.c.fz_open_memory(ctx.ptr, data.ptr, data.len);
-        if (stream == null) {
-            return Error.OpenFailed;
-        }
-        defer c.c.fz_drop_stream(ctx.ptr, stream);
-
         // Ensure magic is null-terminated
         var magic_buf: [256]u8 = undefined;
         if (magic.len >= magic_buf.len) {
@@ -336,8 +329,8 @@ pub const Document = struct {
         @memcpy(magic_buf[0..magic.len], magic);
         magic_buf[magic.len] = 0;
 
-        // Use safe shim that handles fz_try/fz_catch
-        const doc = c.c.mupdf_shim_open_document_with_stream(ctx.ptr, &magic_buf, stream);
+        // Use fz_open_document_with_buffer — MuPDF manages the buffer lifetime
+        const doc = c.c.mupdf_shim_open_document_with_buffer(ctx.ptr, &magic_buf, data.ptr, data.len);
         if (doc == null) {
             return Error.OpenFailed;
         }
@@ -1216,6 +1209,23 @@ pub const Pixmap = struct {
         path_buf[path.len] = 0;
 
         c.c.fz_save_pixmap_as_png(self.ctx.ptr, self.ptr, &path_buf);
+    }
+
+    /// Encode the pixmap as PNG data in memory.
+    ///
+    /// Returns the PNG bytes as an owned slice. The caller must free it.
+    pub fn toPng(self: *Self, alloc: std.mem.Allocator) Error![]u8 {
+        const buf = c.c.mupdf_shim_pixmap_to_png(self.ctx.ptr, self.ptr);
+        if (buf == null) return Error.WriteFailed;
+        defer c.c.fz_drop_buffer(self.ctx.ptr, buf);
+
+        var data_ptr: [*c]u8 = null;
+        const len = c.c.fz_buffer_storage(self.ctx.ptr, buf, &data_ptr);
+        if (data_ptr == null or len == 0) return Error.WriteFailed;
+
+        const result = alloc.alloc(u8, len) catch return Error.OutOfMemory;
+        @memcpy(result, data_ptr[0..len]);
+        return result;
     }
 
     /// Get the raw MuPDF pixmap pointer.

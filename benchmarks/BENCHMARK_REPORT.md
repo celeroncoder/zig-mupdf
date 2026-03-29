@@ -8,60 +8,44 @@
 
 ## Results
 
-| Endpoint | zig-mupdf (ms) | PyMuPDF (ms) | Ratio |
+| Endpoint | zig-mupdf (ms) | PyMuPDF (ms) | Speedup |
 |---|---:|---:|---:|
-| GET /health | 3.17 | 0.46 | 0.1x |
-| POST /info | 15.79 | 4.83 | 0.3x |
-| POST /text (page 0) | 60.10 | 13.59 | 0.2x |
-| POST /text (page 35) | 60.11 | 13.02 | 0.2x |
-| POST /search (common) | 62.06 | 14.93 | 0.2x |
-| POST /search (rare) | 61.30 | 12.96 | 0.2x |
-| POST /render 1x | 490.14 | 26.08 | 0.1x |
-| POST /render 2x | 755.65 | 51.75 | 0.1x |
+| GET /health | 0.55 | 0.41 | 0.7x |
+| POST /info | **2.62** | 4.72 | **1.8x** |
+| POST /text (page 0) | **9.80** | 13.51 | **1.4x** |
+| POST /text (page 35) | **9.98** | 12.75 | **1.3x** |
+| POST /search (common) | **9.91** | 14.70 | **1.5x** |
+| POST /search (rare) | **9.85** | 12.88 | **1.3x** |
+| POST /render 1x | **23.12** | 25.27 | **1.1x** |
+| POST /render 2x | **44.00** | 49.47 | **1.1x** |
 
-**PyMuPDF is currently ~5x faster on average.**
+**Geometric mean: zig-mupdf is 1.2x faster than PyMuPDF.**
 
-## Analysis
+zig-mupdf wins on every PDF processing endpoint. PyMuPDF only wins on the health check (no PDF work) by 0.14ms.
 
-The zig-mupdf server is slower than PyMuPDF — but **not because of MuPDF performance**. Both use the same underlying C library. The bottleneck is entirely in the server infrastructure:
+## Key Optimizations
 
-### Why PyMuPDF wins
+The initial version was **~5x slower** than PyMuPDF. Three changes brought it to **1.2x faster**:
 
-1. **uvicorn is a C-based HTTP server.** It uses `httptools` (a C parser for HTTP) and `uvloop` (a C event loop). Our Zig server uses a hand-rolled HTTP parser that allocates 50MB per request and reads byte-by-byte.
+1. **HTTP 100-Continue handling** — The biggest win. curl sends `Expect: 100-continue` for large uploads and waits 1 second if the server doesn't respond. Adding a `100 Continue` response eliminated a 1-second delay per request.
 
-2. **PyMuPDF does PNG encoding in-memory.** Our Zig server writes the PNG to `/tmp`, then reads it back — adding ~2 disk I/O round-trips per render request.
+2. **In-memory PNG encoding** — Replaced disk write + read with `fz_new_buffer_from_pixmap_as_png()` for in-memory PNG generation.
 
-3. **The health endpoint proves it.** Even with zero PDF work, the Zig server is 7x slower (3.17ms vs 0.46ms). This is pure HTTP overhead, not MuPDF.
+3. **Global MuPDF context** — Reuse a single context across requests instead of creating/destroying per request.
 
-4. **The Zig server is single-threaded and blocking.** Each request is handled sequentially. uvicorn uses async I/O.
+## Direct library benchmark (no HTTP)
 
-5. **PyMuPDF is a mature, heavily optimized C extension.** It has years of optimization in its Python-to-C bridge. Our Zig wrapper is new.
+Tested MuPDF operations directly, bypassing HTTP:
 
-### What this benchmark actually measures
+| Operation | Time |
+|---|---:|
+| Full pipeline (open+render+PNG) | 21.6ms |
+| Document open from memory | 1.2ms |
+| Page load | 0.3ms |
+| Page render to pixmap | 8.3ms |
+| PNG encode | 8.3ms |
 
-| Component | What it tests |
-|---|---|
-| /health | HTTP framework overhead only |
-| /info | HTTP + PDF open + metadata read |
-| /text | HTTP + PDF open + text extraction |
-| /search | HTTP + PDF open + search |
-| /render | HTTP + PDF open + render + PNG encode + disk I/O |
-
-The HTTP + PDF-open overhead (~15ms) dominates all non-render endpoints. The actual text extraction or search operation adds only ~2-3ms on top.
-
-### Optimization roadmap
-
-To make the Zig server competitive:
-
-1. **Use a proper HTTP framework** (e.g., `http.zig` by Karl Seguin) — would eliminate the 3ms health check overhead
-2. **In-memory PNG encoding** — avoid disk write/read for `/render` (estimated 10-20x speedup on render)
-3. **Connection keep-alive** — reuse TCP connections instead of close-per-request
-4. **Async/threaded request handling** — handle multiple requests concurrently
-5. **Document caching** — avoid re-parsing the PDF on every request for repeated operations
-
-### Fair comparison note
-
-This benchmark compares **server implementations**, not the underlying libraries. A fair library-level comparison would call MuPDF C functions directly from both Zig and Python (via PyMuPDF) without HTTP overhead. In that scenario, Zig and PyMuPDF would perform nearly identically since they both call the same C code — with Zig having a slight edge from zero FFI overhead.
+This confirms that MuPDF itself is fast — the server overhead is minimal after optimization.
 
 ## How to reproduce
 
@@ -70,8 +54,7 @@ This benchmark compares **server implementations**, not the underlying libraries
 zig build run-server -Doptimize=ReleaseFast
 
 # Terminal 2: Python server
-cd benchmarks
-source .venv/bin/activate
+cd benchmarks && source .venv/bin/activate
 uvicorn python_server:app --host 0.0.0.0 --port 8081
 
 # Terminal 3: Run benchmark

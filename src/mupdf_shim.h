@@ -59,6 +59,9 @@ fz_document *mupdf_shim_open_document(fz_context *ctx, const char *filename);
 /* Safely open a document from stream - returns NULL on error */
 fz_document *mupdf_shim_open_document_with_stream(fz_context *ctx, const char *magic, fz_stream *stream);
 
+/* Safely open a document from a memory buffer - returns NULL on error */
+fz_document *mupdf_shim_open_document_with_buffer(fz_context *ctx, const char *magic, const unsigned char *data, size_t len);
+
 /* Safely load a page - returns NULL on error */
 fz_page *mupdf_shim_load_page(fz_context *ctx, fz_document *doc, int page_num);
 
@@ -101,6 +104,9 @@ int mupdf_shim_page_images(fz_context *ctx, pdf_document *doc, pdf_page *page,
 
 /* Safely load an image from a PDF object by xref. Returns NULL on error. */
 fz_image *mupdf_shim_load_image(fz_context *ctx, pdf_document *doc, int xref);
+
+/* Safely encode pixmap as PNG in memory - returns NULL on error */
+fz_buffer *mupdf_shim_pixmap_to_png(fz_context *ctx, fz_pixmap *pixmap);
 
 /* Image accessor functions (fz_image has bitfields, can't access from Zig) */
 int mupdf_shim_image_width(fz_image *img);
