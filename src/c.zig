@@ -101,3 +101,7 @@ pub const mupdf_shim_load_links = c.mupdf_shim_load_links;
 pub const mupdf_shim_new_stext_page = c.mupdf_shim_new_stext_page;
 pub const mupdf_shim_stext_to_buffer = c.mupdf_shim_stext_to_buffer;
 pub const mupdf_shim_search_page = c.mupdf_shim_search_page;
+pub const mupdf_shim_image_info = c.mupdf_shim_image_info;
+pub const mupdf_shim_page_images = c.mupdf_shim_page_images;
+pub const mupdf_shim_load_image = c.mupdf_shim_load_image;
+pub const mupdf_shim_image_to_pixmap = c.mupdf_shim_image_to_pixmap;

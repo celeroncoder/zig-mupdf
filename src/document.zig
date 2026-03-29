@@ -681,6 +681,60 @@ pub const Page = struct {
         };
     }
 
+    /// List all embedded images on this page.
+    ///
+    /// Returns an array of ImageInfo structs with metadata about each image.
+    /// Only works for PDF pages. The caller must free the returned slice.
+    pub fn getImages(self: *Self, allocator: std.mem.Allocator) Error![]ImageInfo {
+        const pdf_doc = self.doc.asPdf() orelse return Error.NotAPdf;
+        const pdf_page = c.c.pdf_page_from_fz_page(self.doc.ctx.ptr, self.ptr);
+        if (pdf_page == null) return Error.NotAPdf;
+
+        const max_images = 256;
+        var c_infos: [max_images]c.c.mupdf_shim_image_info = undefined;
+
+        const count = c.c.mupdf_shim_page_images(
+            self.doc.ctx.ptr,
+            pdf_doc,
+            pdf_page,
+            &c_infos,
+            max_images,
+        );
+
+        if (count <= 0) {
+            const empty = allocator.alloc(ImageInfo, 0) catch return Error.OutOfMemory;
+            return empty;
+        }
+
+        const n: usize = @intCast(count);
+        const results = allocator.alloc(ImageInfo, n) catch return Error.OutOfMemory;
+
+        for (0..n) |i| {
+            results[i] = ImageInfo{
+                .xref = c_infos[i].xref,
+                .width = c_infos[i].width,
+                .height = c_infos[i].height,
+                .bpc = c_infos[i].bpc,
+                .components = c_infos[i].n_components,
+                .colorspace = if (c_infos[i].colorspace_name) |cs| std.mem.span(cs) else "",
+                .filter = if (c_infos[i].filter_name) |f| std.mem.span(f) else "",
+                .ref_name = if (c_infos[i].ref_name) |r| std.mem.span(r) else "",
+            };
+        }
+
+        return results;
+    }
+
+    /// Load an image by its xref number for extraction.
+    ///
+    /// Use getImages() first to discover image xrefs on a page.
+    pub fn loadImage(self: *Self, xref: i32) Error!Image {
+        const pdf_doc = self.doc.asPdf() orelse return Error.NotAPdf;
+        const img = c.c.mupdf_shim_load_image(self.doc.ctx.ptr, pdf_doc, xref);
+        if (img == null) return Error.OpenFailed;
+        return Image{ .ptr = img.?, .ctx = self.doc.ctx };
+    }
+
     /// Extract structured text from the page.
     ///
     /// Returns a TextPage that allows iterating blocks, lines, and characters
@@ -1027,6 +1081,73 @@ pub const SearchHit = struct {
     quad: Quad,
     /// Whether this quad is part of the same hit as the previous one (multi-line match).
     mark: bool,
+};
+
+/// Metadata for an embedded image on a page.
+pub const ImageInfo = struct {
+    /// PDF object cross-reference number.
+    xref: i32,
+    /// Image width in pixels.
+    width: i32,
+    /// Image height in pixels.
+    height: i32,
+    /// Bits per component.
+    bpc: i32,
+    /// Number of color components.
+    components: i32,
+    /// Colorspace name (e.g., "DeviceRGB").
+    colorspace: []const u8,
+    /// Compression filter name (e.g., "DCTDecode" for JPEG).
+    filter: []const u8,
+    /// Reference name in the page's Resources/XObject dict.
+    ref_name: []const u8,
+};
+
+/// A loaded image from a PDF, ready for extraction.
+pub const Image = struct {
+    ptr: *c.c.fz_image,
+    ctx: *Context,
+
+    /// Get image width in pixels.
+    pub fn getWidth(self: *const Image) i32 {
+        return c.c.mupdf_shim_image_width(self.ptr);
+    }
+
+    /// Get image height in pixels.
+    pub fn getHeight(self: *const Image) i32 {
+        return c.c.mupdf_shim_image_height(self.ptr);
+    }
+
+    /// Get bits per component.
+    pub fn getBpc(self: *const Image) i32 {
+        return c.c.mupdf_shim_image_bpc(self.ptr);
+    }
+
+    /// Get number of components per pixel.
+    pub fn getComponents(self: *const Image) i32 {
+        return c.c.mupdf_shim_image_n(self.ptr);
+    }
+
+    /// Get image resolution in DPI.
+    pub fn getResolution(self: *const Image) struct { xres: i32, yres: i32 } {
+        return .{
+            .xres = c.c.mupdf_shim_image_xres(self.ptr),
+            .yres = c.c.mupdf_shim_image_yres(self.ptr),
+        };
+    }
+
+    /// Decode the image to a Pixmap for pixel access or PNG export.
+    pub fn toPixmap(self: *Image) Error!Pixmap {
+        const pix = c.c.mupdf_shim_image_to_pixmap(self.ctx.ptr, self.ptr);
+        if (pix == null) return Error.PixmapCreationFailed;
+        return Pixmap{ .ptr = pix.?, .ctx = self.ctx };
+    }
+
+    /// Release image resources.
+    pub fn deinit(self: *Image) void {
+        c.c.fz_drop_image(self.ctx.ptr, self.ptr);
+        self.ptr = undefined;
+    }
 };
 
 /// Rectangle structure.
@@ -1987,4 +2108,147 @@ test "Page.extractText with no text returns empty" {
     // Empty page should return empty or whitespace-only text
     const trimmed = std.mem.trim(u8, text, " \t\n\r");
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+}
+
+// ============================================
+// Image Extraction Tests (Phase 4)
+// ============================================
+
+const image_pdf_path = "tests/fixtures/image_sample.pdf";
+
+test "Page.getImages finds embedded images" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    var doc = try Document.open(&ctx, image_pdf_path);
+    defer doc.deinit();
+
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+
+    const allocator = std.testing.allocator;
+    const images = try page.getImages(allocator);
+    defer allocator.free(images);
+
+    // Our test PDF has one embedded image
+    try std.testing.expect(images.len >= 1);
+
+    // Check image metadata
+    const img = images[0];
+    try std.testing.expectEqual(@as(i32, 8), img.width);
+    try std.testing.expectEqual(@as(i32, 8), img.height);
+    try std.testing.expectEqual(@as(i32, 8), img.bpc);
+    try std.testing.expect(img.xref > 0);
+}
+
+test "Page.getImages returns image colorspace info" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    var doc = try Document.open(&ctx, image_pdf_path);
+    defer doc.deinit();
+
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+
+    const allocator = std.testing.allocator;
+    const images = try page.getImages(allocator);
+    defer allocator.free(images);
+
+    try std.testing.expect(images.len >= 1);
+    // DeviceRGB colorspace
+    try std.testing.expect(images[0].colorspace.len > 0);
+}
+
+test "Page.getImages returns empty for page without images" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    var doc = try Document.open(&ctx, text_pdf_path);
+    defer doc.deinit();
+
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+
+    const allocator = std.testing.allocator;
+    const images = try page.getImages(allocator);
+    defer allocator.free(images);
+
+    try std.testing.expectEqual(@as(usize, 0), images.len);
+}
+
+test "Page.loadImage loads image by xref" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    var doc = try Document.open(&ctx, image_pdf_path);
+    defer doc.deinit();
+
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+
+    const allocator = std.testing.allocator;
+    const images = try page.getImages(allocator);
+    defer allocator.free(images);
+
+    try std.testing.expect(images.len >= 1);
+
+    var img = try page.loadImage(images[0].xref);
+    defer img.deinit();
+
+    try std.testing.expectEqual(@as(i32, 8), img.getWidth());
+    try std.testing.expectEqual(@as(i32, 8), img.getHeight());
+    try std.testing.expectEqual(@as(i32, 8), img.getBpc());
+}
+
+test "Image.toPixmap decodes image to pixels" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    var doc = try Document.open(&ctx, image_pdf_path);
+    defer doc.deinit();
+
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+
+    const allocator = std.testing.allocator;
+    const images = try page.getImages(allocator);
+    defer allocator.free(images);
+
+    try std.testing.expect(images.len >= 1);
+
+    var img = try page.loadImage(images[0].xref);
+    defer img.deinit();
+
+    var pixmap = try img.toPixmap();
+    defer pixmap.deinit();
+
+    try std.testing.expectEqual(@as(i32, 8), pixmap.width());
+    try std.testing.expectEqual(@as(i32, 8), pixmap.height());
+    try std.testing.expect(pixmap.components() >= 3); // RGB or RGBA
+}
+
+test "Image.getResolution returns DPI info" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    var doc = try Document.open(&ctx, image_pdf_path);
+    defer doc.deinit();
+
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+
+    const allocator = std.testing.allocator;
+    const images = try page.getImages(allocator);
+    defer allocator.free(images);
+
+    try std.testing.expect(images.len >= 1);
+
+    var img = try page.loadImage(images[0].xref);
+    defer img.deinit();
+
+    const res = img.getResolution();
+    // Resolution should be positive (typically 72 or 96 DPI)
+    try std.testing.expect(res.xres > 0);
+    try std.testing.expect(res.yres > 0);
 }

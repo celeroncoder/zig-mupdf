@@ -83,4 +83,34 @@ fz_buffer *mupdf_shim_stext_to_buffer(fz_context *ctx, fz_stext_page *text);
 /* Safely search a page for text - returns number of quads found, -1 on error */
 int mupdf_shim_search_page(fz_context *ctx, fz_page *page, const char *needle, int *hit_mark, fz_quad *hit_bbox, int hit_max);
 
+/* Image info for a single XObject image on a page */
+typedef struct {
+    int xref;
+    int width;
+    int height;
+    int bpc;
+    int n_components;
+    const char *colorspace_name;
+    const char *filter_name;
+    const char *ref_name;
+} mupdf_shim_image_info;
+
+/* Enumerate images on a PDF page. Returns count, fills info array up to max_images. Returns -1 on error. */
+int mupdf_shim_page_images(fz_context *ctx, pdf_document *doc, pdf_page *page,
+                           mupdf_shim_image_info *infos, int max_images);
+
+/* Safely load an image from a PDF object by xref. Returns NULL on error. */
+fz_image *mupdf_shim_load_image(fz_context *ctx, pdf_document *doc, int xref);
+
+/* Image accessor functions (fz_image has bitfields, can't access from Zig) */
+int mupdf_shim_image_width(fz_image *img);
+int mupdf_shim_image_height(fz_image *img);
+int mupdf_shim_image_bpc(fz_image *img);
+int mupdf_shim_image_n(fz_image *img);
+int mupdf_shim_image_xres(fz_image *img);
+int mupdf_shim_image_yres(fz_image *img);
+
+/* Safely get pixmap from an image. Returns NULL on error. */
+fz_pixmap *mupdf_shim_image_to_pixmap(fz_context *ctx, fz_image *image);
+
 #endif /* MUPDF_SHIM_H */

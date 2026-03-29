@@ -10,6 +10,18 @@
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
 
+/* Image info struct (must match mupdf_shim.h) */
+typedef struct {
+    int xref;
+    int width;
+    int height;
+    int bpc;
+    int n_components;
+    const char *colorspace_name;
+    const char *filter_name;
+    const char *ref_name;
+} mupdf_shim_image_info;
+
 /* ============================================
  * Font flag accessor functions
  * ============================================ */
@@ -198,3 +210,116 @@ int mupdf_shim_search_page(fz_context *ctx, fz_page *page, const char *needle, i
     }
     return count;
 }
+
+int mupdf_shim_page_images(fz_context *ctx, pdf_document *doc, pdf_page *page,
+                           mupdf_shim_image_info *infos, int max_images)
+{
+    int count = 0;
+    fz_try(ctx)
+    {
+        pdf_obj *resources = pdf_page_resources(ctx, page);
+        pdf_obj *xobj = pdf_dict_get(ctx, resources, PDF_NAME(XObject));
+        if (!xobj) { fz_throw(ctx, 0, "no xobjects"); }
+
+        int n = pdf_dict_len(ctx, xobj);
+        for (int i = 0; i < n && count < max_images; i++)
+        {
+            pdf_obj *key = pdf_dict_get_key(ctx, xobj, i);
+            pdf_obj *val_raw = pdf_dict_get_val(ctx, xobj, i);
+
+            /* Get xref before resolving */
+            int xref = pdf_to_num(ctx, val_raw);
+
+            /* Resolve indirect references */
+            pdf_obj *val = pdf_resolve_indirect(ctx, val_raw);
+            if (!val) continue;
+
+            pdf_obj *subtype = pdf_dict_get(ctx, val, PDF_NAME(Subtype));
+            if (!pdf_name_eq(ctx, subtype, PDF_NAME(Image)))
+                continue;
+
+            mupdf_shim_image_info *info = &infos[count];
+            info->xref = xref;
+            info->width = pdf_to_int(ctx, pdf_dict_geta(ctx, val, PDF_NAME(Width), PDF_NAME(W)));
+            info->height = pdf_to_int(ctx, pdf_dict_geta(ctx, val, PDF_NAME(Height), PDF_NAME(H)));
+            info->bpc = pdf_to_int(ctx, pdf_dict_geta(ctx, val, PDF_NAME(BitsPerComponent), PDF_NAME(BPC)));
+
+            /* Colorspace */
+            pdf_obj *cs = pdf_dict_geta(ctx, val, PDF_NAME(ColorSpace), PDF_NAME(CS));
+            if (cs)
+                info->colorspace_name = pdf_to_name(ctx, cs);
+            else
+                info->colorspace_name = "";
+
+            /* Filter */
+            pdf_obj *filter = pdf_dict_geta(ctx, val, PDF_NAME(Filter), PDF_NAME(F));
+            if (pdf_is_array(ctx, filter))
+                filter = pdf_array_get(ctx, filter, 0);
+            if (filter)
+                info->filter_name = pdf_to_name(ctx, filter);
+            else
+                info->filter_name = "";
+
+            /* Number of components (from colorspace if available) */
+            info->n_components = 0;
+            if (cs) {
+                fz_try(ctx) {
+                    fz_colorspace *fzcs = pdf_load_colorspace(ctx, val);
+                    info->n_components = fz_colorspace_n(ctx, fzcs);
+                    fz_drop_colorspace(ctx, fzcs);
+                }
+                fz_catch(ctx) {
+                    info->n_components = 0;
+                }
+            }
+
+            /* Reference name */
+            info->ref_name = pdf_to_name(ctx, key);
+
+            count++;
+        }
+    }
+    fz_catch(ctx)
+    {
+        /* Return whatever we found so far, or 0 */
+        if (count < 0) count = 0;
+    }
+    return count;
+}
+
+fz_image *mupdf_shim_load_image(fz_context *ctx, pdf_document *doc, int xref)
+{
+    fz_image *img = NULL;
+    fz_try(ctx)
+    {
+        pdf_obj *obj = pdf_new_indirect(ctx, doc, xref, 0);
+        img = pdf_load_image(ctx, doc, obj);
+        pdf_drop_obj(ctx, obj);
+    }
+    fz_catch(ctx)
+    {
+        img = NULL;
+    }
+    return img;
+}
+
+fz_pixmap *mupdf_shim_image_to_pixmap(fz_context *ctx, fz_image *image)
+{
+    fz_pixmap *pix = NULL;
+    fz_try(ctx)
+    {
+        pix = fz_get_pixmap_from_image(ctx, image, NULL, NULL, NULL, NULL);
+    }
+    fz_catch(ctx)
+    {
+        pix = NULL;
+    }
+    return pix;
+}
+
+int mupdf_shim_image_width(fz_image *img) { return img ? img->w : 0; }
+int mupdf_shim_image_height(fz_image *img) { return img ? img->h : 0; }
+int mupdf_shim_image_bpc(fz_image *img) { return img ? img->bpc : 0; }
+int mupdf_shim_image_n(fz_image *img) { return img ? img->n : 0; }
+int mupdf_shim_image_xres(fz_image *img) { return img ? img->xres : 0; }
+int mupdf_shim_image_yres(fz_image *img) { return img ? img->yres : 0; }

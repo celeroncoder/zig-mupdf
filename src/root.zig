@@ -79,6 +79,8 @@ pub const TextCharIterator = @import("document.zig").TextCharIterator;
 pub const TextOptions = @import("document.zig").TextOptions;
 pub const SearchHit = @import("document.zig").SearchHit;
 pub const BlockType = @import("document.zig").BlockType;
+pub const ImageInfo = @import("document.zig").ImageInfo;
+pub const Image = @import("document.zig").Image;
 
 // Error handling
 pub const Error = @import("error.zig").Error;
