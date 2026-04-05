@@ -714,6 +714,22 @@ pub const Page = struct {
         };
     }
 
+    /// Iterate over annotations on this page.
+    pub fn getAnnotations(self: *Self) ?AnnotationIterator {
+        const pdf_page = c.c.pdf_page_from_fz_page(self.doc.ctx.ptr, self.ptr);
+        if (pdf_page == null) return null;
+        return .{ .current = c.c.mupdf_shim_first_annot(self.doc.ctx.ptr, pdf_page), .ctx_ptr = self.doc.ctx.ptr, .page_ptr = pdf_page.? };
+    }
+
+    /// Create a new annotation on this page.
+    pub fn createAnnotation(self: *Self, annot_type: AnnotationType) Error!Annotation {
+        const pdf_page = c.c.pdf_page_from_fz_page(self.doc.ctx.ptr, self.ptr);
+        if (pdf_page == null) return Error.NotAPdf;
+        const annot = c.c.mupdf_shim_create_annot(self.doc.ctx.ptr, pdf_page, @intFromEnum(annot_type));
+        if (annot == null) return Error.MupdfError;
+        return .{ .ptr = annot.?, .ctx_ptr = self.doc.ctx.ptr, .page_ptr = pdf_page.? };
+    }
+
     /// List all embedded images on this page.
     ///
     /// Returns an array of ImageInfo structs with metadata about each image.
@@ -1180,6 +1196,105 @@ pub const Image = struct {
     pub fn deinit(self: *Image) void {
         c.c.fz_drop_image(self.ctx.ptr, self.ptr);
         self.ptr = undefined;
+    }
+};
+
+/// PDF annotation types.
+pub const AnnotationType = enum(i32) {
+    text = 0, link = 1, free_text = 2, line = 3, square = 4, circle = 5,
+    polygon = 6, poly_line = 7, highlight = 8, underline = 9, squiggly = 10,
+    strike_out = 11, redact = 12, stamp = 13, caret = 14, ink = 15, popup = 16,
+    file_attachment = 17, sound = 18, movie = 19, rich_media = 20, widget = 21,
+    screen = 22, printer_mark = 23, trap_net = 24, watermark = 25,
+    @"3d" = 26, projection = 27, unknown = -1,
+};
+
+/// RGB color (0.0-1.0 per component).
+pub const Color = struct { r: f32 = 0, g: f32 = 0, b: f32 = 0 };
+
+/// A PDF annotation on a page.
+pub const Annotation = struct {
+    ptr: *c.c.pdf_annot,
+    ctx_ptr: *c.c.fz_context,
+    page_ptr: *c.c.pdf_page,
+
+    pub fn getType(self: *const Annotation) AnnotationType {
+        return std.meta.intToEnum(AnnotationType, c.c.mupdf_shim_annot_type(self.ctx_ptr, self.ptr)) catch .unknown;
+    }
+    pub fn getRect(self: *const Annotation) Rect {
+        const r = c.c.mupdf_shim_annot_rect(self.ctx_ptr, self.ptr);
+        return .{ .x0 = r.x0, .y0 = r.y0, .x1 = r.x1, .y1 = r.y1 };
+    }
+    pub fn getContents(self: *const Annotation) []const u8 {
+        const s = c.c.mupdf_shim_annot_contents(self.ctx_ptr, self.ptr);
+        return if (s) |p| std.mem.span(p) else "";
+    }
+    pub fn getAuthor(self: *const Annotation) []const u8 {
+        const s = c.c.mupdf_shim_annot_author(self.ctx_ptr, self.ptr);
+        return if (s) |p| std.mem.span(p) else "";
+    }
+    pub fn getColor(self: *const Annotation) Color {
+        var n: c_int = 0;
+        var col: [4]f32 = .{ 0, 0, 0, 0 };
+        c.c.mupdf_shim_annot_color(self.ctx_ptr, self.ptr, &n, &col);
+        return .{ .r = col[0], .g = col[1], .b = col[2] };
+    }
+    pub fn getOpacity(self: *const Annotation) f32 {
+        return c.c.mupdf_shim_annot_opacity(self.ctx_ptr, self.ptr);
+    }
+    pub fn setContents(self: *Annotation, text: []const u8) void {
+        var buf: [4096]u8 = undefined;
+        if (text.len >= buf.len) return;
+        @memcpy(buf[0..text.len], text);
+        buf[text.len] = 0;
+        c.c.mupdf_shim_set_annot_contents(self.ctx_ptr, self.ptr, &buf);
+    }
+    pub fn setAuthor(self: *Annotation, author: []const u8) void {
+        var buf: [256]u8 = undefined;
+        if (author.len >= buf.len) return;
+        @memcpy(buf[0..author.len], author);
+        buf[author.len] = 0;
+        c.c.mupdf_shim_set_annot_author(self.ctx_ptr, self.ptr, &buf);
+    }
+    pub fn setColor(self: *Annotation, color: Color) void {
+        const col = [_]f32{ color.r, color.g, color.b };
+        c.c.mupdf_shim_set_annot_color(self.ctx_ptr, self.ptr, 3, &col);
+    }
+    pub fn setOpacity(self: *Annotation, opacity: f32) void {
+        c.c.mupdf_shim_set_annot_opacity(self.ctx_ptr, self.ptr, opacity);
+    }
+    pub fn setRect(self: *Annotation, rect: Rect) void {
+        c.c.mupdf_shim_set_annot_rect(self.ctx_ptr, self.ptr, .{ .x0 = rect.x0, .y0 = rect.y0, .x1 = rect.x1, .y1 = rect.y1 });
+    }
+    pub fn setQuadPoints(self: *Annotation, quads: []const Quad) void {
+        if (quads.len > 128) return;
+        var fz_quads: [128]c.c.fz_quad = undefined;
+        for (quads, 0..) |q, i| {
+            fz_quads[i] = .{
+                .ul = .{ .x = q.ul.x, .y = q.ul.y }, .ur = .{ .x = q.ur.x, .y = q.ur.y },
+                .ll = .{ .x = q.ll.x, .y = q.ll.y }, .lr = .{ .x = q.lr.x, .y = q.lr.y },
+            };
+        }
+        c.c.mupdf_shim_set_annot_quad_points(self.ctx_ptr, self.ptr, @intCast(quads.len), &fz_quads);
+    }
+    pub fn update(self: *Annotation) void {
+        _ = c.c.mupdf_shim_update_annot(self.ctx_ptr, self.ptr);
+    }
+    pub fn delete(self: *Annotation) Error!void {
+        if (c.c.mupdf_shim_delete_annot(self.ctx_ptr, self.page_ptr, self.ptr) != 0) return Error.MupdfError;
+    }
+};
+
+/// Iterator over annotations on a page.
+pub const AnnotationIterator = struct {
+    current: ?*c.c.pdf_annot,
+    ctx_ptr: *c.c.fz_context,
+    page_ptr: *c.c.pdf_page,
+
+    pub fn next(self: *AnnotationIterator) ?Annotation {
+        const annot = self.current orelse return null;
+        self.current = c.c.mupdf_shim_next_annot(self.ctx_ptr, annot);
+        return .{ .ptr = annot, .ctx_ptr = self.ctx_ptr, .page_ptr = self.page_ptr };
     }
 };
 
@@ -2468,4 +2583,157 @@ test "Document.createPdf creates empty document" {
 
     try std.testing.expectEqual(@as(i32, 0), doc.pageCount());
     try std.testing.expect(doc.isPdf());
+}
+
+// ============================================
+// Annotation Tests (Phase 6)
+// ============================================
+
+fn countAnnotations(page: *Page) usize {
+    var count: usize = 0;
+    var iter = page.getAnnotations() orelse return 0;
+    while (iter.next()) |_| count += 1;
+    return count;
+}
+
+test "Page.getAnnotations returns empty for page without annotations" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    const al = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(al, multipage_pdf_path, 10 * 1024 * 1024);
+    defer al.free(data);
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 0), countAnnotations(&page));
+}
+
+test "Page.createAnnotation creates text annotation" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    const al = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(al, multipage_pdf_path, 10 * 1024 * 1024);
+    defer al.free(data);
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+
+    var annot = try page.createAnnotation(.text);
+    annot.setRect(.{ .x0 = 100, .y0 = 100, .x1 = 200, .y1 = 150 });
+    annot.setContents("Test note");
+    annot.update();
+
+    try std.testing.expectEqual(AnnotationType.text, annot.getType());
+    try std.testing.expectEqualStrings("Test note", annot.getContents());
+}
+
+test "Page.createAnnotation creates highlight annotation with color" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    const al = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(al, multipage_pdf_path, 10 * 1024 * 1024);
+    defer al.free(data);
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+
+    var annot = try page.createAnnotation(.highlight);
+    annot.setColor(.{ .r = 1.0, .g = 1.0, .b = 0.0 });
+    const quad = Quad{
+        .ul = .{ .x = 72, .y = 700 }, .ur = .{ .x = 200, .y = 700 },
+        .ll = .{ .x = 72, .y = 720 }, .lr = .{ .x = 200, .y = 720 },
+    };
+    annot.setQuadPoints(&[_]Quad{quad});
+    annot.update();
+
+    try std.testing.expectEqual(AnnotationType.highlight, annot.getType());
+    const color = annot.getColor();
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), color.r, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), color.g, 0.01);
+}
+
+test "Annotation iteration counts created annotations" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    const al = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(al, multipage_pdf_path, 10 * 1024 * 1024);
+    defer al.free(data);
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+
+    var a1 = try page.createAnnotation(.text);
+    a1.setContents("Note 1");
+    a1.update();
+    var a2 = try page.createAnnotation(.text);
+    a2.setContents("Note 2");
+    a2.update();
+
+    try std.testing.expectEqual(@as(usize, 2), countAnnotations(&page));
+}
+
+test "Annotation.setAuthor and getAuthor" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    const al = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(al, multipage_pdf_path, 10 * 1024 * 1024);
+    defer al.free(data);
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+
+    var annot = try page.createAnnotation(.text);
+    annot.setAuthor("Test Author");
+    annot.update();
+    try std.testing.expectEqualStrings("Test Author", annot.getAuthor());
+}
+
+test "Annotation.setOpacity and getOpacity" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    const al = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(al, multipage_pdf_path, 10 * 1024 * 1024);
+    defer al.free(data);
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+
+    var annot = try page.createAnnotation(.text);
+    annot.setOpacity(0.5);
+    annot.update();
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), annot.getOpacity(), 0.01);
+}
+
+test "Annotation.delete removes annotation" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    const al = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(al, multipage_pdf_path, 10 * 1024 * 1024);
+    defer al.free(data);
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+
+    var annot = try page.createAnnotation(.text);
+    annot.setContents("Will be deleted");
+    annot.update();
+    try std.testing.expectEqual(@as(usize, 1), countAnnotations(&page));
+
+    try annot.delete();
+    try std.testing.expectEqual(@as(usize, 0), countAnnotations(&page));
+}
+
+test "AnnotationType enum values" {
+    try std.testing.expectEqual(@as(i32, 0), @intFromEnum(AnnotationType.text));
+    try std.testing.expectEqual(@as(i32, 8), @intFromEnum(AnnotationType.highlight));
+    try std.testing.expectEqual(@as(i32, 9), @intFromEnum(AnnotationType.underline));
+    try std.testing.expectEqual(@as(i32, 11), @intFromEnum(AnnotationType.strike_out));
+    try std.testing.expectEqual(@as(i32, -1), @intFromEnum(AnnotationType.unknown));
 }

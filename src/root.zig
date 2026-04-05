@@ -81,6 +81,10 @@ pub const SearchHit = @import("document.zig").SearchHit;
 pub const BlockType = @import("document.zig").BlockType;
 pub const ImageInfo = @import("document.zig").ImageInfo;
 pub const Image = @import("document.zig").Image;
+pub const Annotation = @import("document.zig").Annotation;
+pub const AnnotationType = @import("document.zig").AnnotationType;
+pub const AnnotationIterator = @import("document.zig").AnnotationIterator;
+pub const Color = @import("document.zig").Color;
 
 // Error handling
 pub const Error = @import("error.zig").Error;

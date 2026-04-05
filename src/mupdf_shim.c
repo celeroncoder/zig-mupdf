@@ -424,3 +424,137 @@ int mupdf_shim_rearrange_pages(fz_context *ctx, pdf_document *doc, int count, co
     }
     return result;
 }
+
+/* ============================================
+ * Annotation functions
+ * ============================================ */
+
+pdf_annot *mupdf_shim_first_annot(fz_context *ctx, pdf_page *page)
+{
+    pdf_annot *annot = NULL;
+    fz_try(ctx) { annot = pdf_first_annot(ctx, page); }
+    fz_catch(ctx) { annot = NULL; }
+    return annot;
+}
+
+pdf_annot *mupdf_shim_next_annot(fz_context *ctx, pdf_annot *annot)
+{
+    pdf_annot *next = NULL;
+    fz_try(ctx) { next = pdf_next_annot(ctx, annot); }
+    fz_catch(ctx) { next = NULL; }
+    return next;
+}
+
+int mupdf_shim_annot_type(fz_context *ctx, pdf_annot *annot)
+{
+    int type = -1;
+    fz_try(ctx) { type = (int)pdf_annot_type(ctx, annot); }
+    fz_catch(ctx) { type = -1; }
+    return type;
+}
+
+fz_rect mupdf_shim_annot_rect(fz_context *ctx, pdf_annot *annot)
+{
+    fz_rect r = fz_empty_rect;
+    fz_try(ctx) { r = pdf_annot_rect(ctx, annot); }
+    fz_catch(ctx) { r = fz_empty_rect; }
+    return r;
+}
+
+const char *mupdf_shim_annot_contents(fz_context *ctx, pdf_annot *annot)
+{
+    const char *s = "";
+    fz_try(ctx) { s = pdf_annot_contents(ctx, annot); if (!s) s = ""; }
+    fz_catch(ctx) { s = ""; }
+    return s;
+}
+
+const char *mupdf_shim_annot_author(fz_context *ctx, pdf_annot *annot)
+{
+    const char *s = "";
+    fz_try(ctx) { s = pdf_annot_author(ctx, annot); if (!s) s = ""; }
+    fz_catch(ctx) { s = ""; }
+    return s;
+}
+
+void mupdf_shim_annot_color(fz_context *ctx, pdf_annot *annot, int *n, float color[4])
+{
+    fz_try(ctx) { pdf_annot_color(ctx, annot, n, color); }
+    fz_catch(ctx) { *n = 0; }
+}
+
+float mupdf_shim_annot_opacity(fz_context *ctx, pdf_annot *annot)
+{
+    float o = 1.0f;
+    fz_try(ctx) { o = pdf_annot_opacity(ctx, annot); }
+    fz_catch(ctx) { o = 1.0f; }
+    return o;
+}
+
+int64_t mupdf_shim_annot_modification_date(fz_context *ctx, pdf_annot *annot)
+{
+    int64_t d = 0;
+    fz_try(ctx) { d = pdf_annot_modification_date(ctx, annot); }
+    fz_catch(ctx) { d = 0; }
+    return d;
+}
+
+pdf_annot *mupdf_shim_create_annot(fz_context *ctx, pdf_page *page, int type)
+{
+    pdf_annot *annot = NULL;
+    fz_try(ctx) { annot = pdf_create_annot(ctx, page, (enum pdf_annot_type)type); }
+    fz_catch(ctx) { annot = NULL; }
+    return annot;
+}
+
+int mupdf_shim_delete_annot(fz_context *ctx, pdf_page *page, pdf_annot *annot)
+{
+    int result = 0;
+    fz_try(ctx) { pdf_delete_annot(ctx, page, annot); }
+    fz_catch(ctx) { result = -1; }
+    return result;
+}
+
+void mupdf_shim_set_annot_rect(fz_context *ctx, pdf_annot *annot, fz_rect rect)
+{
+    fz_try(ctx) { pdf_set_annot_rect(ctx, annot, rect); }
+    fz_catch(ctx) { }
+}
+
+void mupdf_shim_set_annot_contents(fz_context *ctx, pdf_annot *annot, const char *text)
+{
+    fz_try(ctx) { pdf_set_annot_contents(ctx, annot, text); }
+    fz_catch(ctx) { }
+}
+
+void mupdf_shim_set_annot_author(fz_context *ctx, pdf_annot *annot, const char *author)
+{
+    fz_try(ctx) { pdf_set_annot_author(ctx, annot, author); }
+    fz_catch(ctx) { }
+}
+
+void mupdf_shim_set_annot_color(fz_context *ctx, pdf_annot *annot, int n, const float *color)
+{
+    fz_try(ctx) { pdf_set_annot_color(ctx, annot, n, color); }
+    fz_catch(ctx) { }
+}
+
+void mupdf_shim_set_annot_opacity(fz_context *ctx, pdf_annot *annot, float opacity)
+{
+    fz_try(ctx) { pdf_set_annot_opacity(ctx, annot, opacity); }
+    fz_catch(ctx) { }
+}
+
+void mupdf_shim_set_annot_quad_points(fz_context *ctx, pdf_annot *annot, int n, const fz_quad *quads)
+{
+    fz_try(ctx) { pdf_set_annot_quad_points(ctx, annot, n, quads); }
+    fz_catch(ctx) { }
+}
+
+int mupdf_shim_update_annot(fz_context *ctx, pdf_annot *annot)
+{
+    int result = 0;
+    fz_try(ctx) { pdf_update_annot(ctx, annot); }
+    fz_catch(ctx) { result = -1; }
+    return result;
+}

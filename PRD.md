@@ -325,7 +325,7 @@ for (results) |hit| {
 
 ---
 
-### Phase 6: Annotations & Links (Week 14-15)
+### Phase 6: Annotations & Links (Week 14-15) ✅ COMPLETED
 
 **Objective**: Read and create annotations
 

@@ -134,4 +134,62 @@ int mupdf_shim_graft_page(fz_context *ctx, pdf_document *dst, int page_to, pdf_d
 /* Rearrange pages in the given order. Returns 0 on success, -1 on error. */
 int mupdf_shim_rearrange_pages(fz_context *ctx, pdf_document *doc, int count, const int *pages);
 
+/* ============================================
+ * Annotation functions
+ * ============================================ */
+
+/* Get first annotation on a PDF page. Returns NULL if none. */
+pdf_annot *mupdf_shim_first_annot(fz_context *ctx, pdf_page *page);
+
+/* Get next annotation. Returns NULL at end. */
+pdf_annot *mupdf_shim_next_annot(fz_context *ctx, pdf_annot *annot);
+
+/* Get annotation type (returns enum pdf_annot_type value, -1 on error). */
+int mupdf_shim_annot_type(fz_context *ctx, pdf_annot *annot);
+
+/* Get annotation bounding rect. */
+fz_rect mupdf_shim_annot_rect(fz_context *ctx, pdf_annot *annot);
+
+/* Get annotation contents text. Returns "" on error. */
+const char *mupdf_shim_annot_contents(fz_context *ctx, pdf_annot *annot);
+
+/* Get annotation author. Returns "" on error. */
+const char *mupdf_shim_annot_author(fz_context *ctx, pdf_annot *annot);
+
+/* Get annotation color (fills n and color[4]). */
+void mupdf_shim_annot_color(fz_context *ctx, pdf_annot *annot, int *n, float color[4]);
+
+/* Get annotation opacity (0-1). */
+float mupdf_shim_annot_opacity(fz_context *ctx, pdf_annot *annot);
+
+/* Get annotation modification date (epoch seconds). */
+int64_t mupdf_shim_annot_modification_date(fz_context *ctx, pdf_annot *annot);
+
+/* Create an annotation. Returns NULL on error. Caller must drop. */
+pdf_annot *mupdf_shim_create_annot(fz_context *ctx, pdf_page *page, int type);
+
+/* Delete an annotation. Returns 0 on success, -1 on error. */
+int mupdf_shim_delete_annot(fz_context *ctx, pdf_page *page, pdf_annot *annot);
+
+/* Set annotation rect. */
+void mupdf_shim_set_annot_rect(fz_context *ctx, pdf_annot *annot, fz_rect rect);
+
+/* Set annotation contents text. */
+void mupdf_shim_set_annot_contents(fz_context *ctx, pdf_annot *annot, const char *text);
+
+/* Set annotation author. */
+void mupdf_shim_set_annot_author(fz_context *ctx, pdf_annot *annot, const char *author);
+
+/* Set annotation color (RGB). */
+void mupdf_shim_set_annot_color(fz_context *ctx, pdf_annot *annot, int n, const float *color);
+
+/* Set annotation opacity. */
+void mupdf_shim_set_annot_opacity(fz_context *ctx, pdf_annot *annot, float opacity);
+
+/* Set quad points for highlight/underline/strikeout annotations. */
+void mupdf_shim_set_annot_quad_points(fz_context *ctx, pdf_annot *annot, int n, const fz_quad *quads);
+
+/* Update annotation appearance. Returns 0 on success. */
+int mupdf_shim_update_annot(fz_context *ctx, pdf_annot *annot);
+
 #endif /* MUPDF_SHIM_H */
