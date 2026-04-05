@@ -119,4 +119,19 @@ int mupdf_shim_image_yres(fz_image *img);
 /* Safely get pixmap from an image. Returns NULL on error. */
 fz_pixmap *mupdf_shim_image_to_pixmap(fz_context *ctx, fz_image *image);
 
+/* Create a new empty PDF document. Returns NULL on error. */
+pdf_document *mupdf_shim_create_pdf(fz_context *ctx);
+
+/* Delete a page from a PDF. Returns 0 on success, -1 on error. */
+int mupdf_shim_delete_page(fz_context *ctx, pdf_document *doc, int page_num);
+
+/* Delete a range of pages [start, end). Returns 0 on success, -1 on error. */
+int mupdf_shim_delete_page_range(fz_context *ctx, pdf_document *doc, int start, int end);
+
+/* Graft (copy) a page from src to dst. Returns 0 on success, -1 on error. */
+int mupdf_shim_graft_page(fz_context *ctx, pdf_document *dst, int page_to, pdf_document *src, int page_from);
+
+/* Rearrange pages in the given order. Returns 0 on success, -1 on error. */
+int mupdf_shim_rearrange_pages(fz_context *ctx, pdf_document *doc, int count, const int *pages);
+
 #endif /* MUPDF_SHIM_H */

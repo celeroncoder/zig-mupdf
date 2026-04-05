@@ -538,6 +538,66 @@ pub const Document = struct {
         return c.c.pdf_specifics(self.ctx.ptr, self.ptr);
     }
 
+    /// Delete a page by index (0-based).
+    ///
+    /// Only works for PDF documents.
+    pub fn deletePage(self: *Self, page_num: i32) Error!void {
+        const pdf_doc = self.asPdf() orelse return Error.NotAPdf;
+        if (page_num < 0 or page_num >= self.pageCount()) return Error.PageOutOfRange;
+        const result = c.c.mupdf_shim_delete_page(self.ctx.ptr, pdf_doc, page_num);
+        if (result != 0) return Error.MupdfError;
+    }
+
+    /// Delete a range of pages [start, end) (0-based, exclusive end).
+    ///
+    /// Only works for PDF documents.
+    pub fn deletePageRange(self: *Self, start: i32, end: i32) Error!void {
+        const pdf_doc = self.asPdf() orelse return Error.NotAPdf;
+        const result = c.c.mupdf_shim_delete_page_range(self.ctx.ptr, pdf_doc, start, end);
+        if (result != 0) return Error.MupdfError;
+    }
+
+    /// Copy a page from another document into this one.
+    ///
+    /// `page_to`: insertion position in this document (-1 = append at end).
+    /// `src`: source document to copy from.
+    /// `page_from`: page index in the source document.
+    ///
+    /// Both documents must be PDFs.
+    pub fn insertPageFrom(self: *Self, page_to: i32, src: *Self, page_from: i32) Error!void {
+        const dst_pdf = self.asPdf() orelse return Error.NotAPdf;
+        const src_pdf = src.asPdf() orelse return Error.NotAPdf;
+        _ = src_pdf;
+        const result = c.c.mupdf_shim_graft_page(self.ctx.ptr, dst_pdf, page_to, c.c.pdf_specifics(src.ctx.ptr, src.ptr), page_from);
+        if (result != 0) return Error.MupdfError;
+    }
+
+    /// Rearrange pages in the specified order.
+    ///
+    /// `page_order`: array of 0-based page indices in the desired order.
+    /// Pages not listed are removed. Pages can be duplicated.
+    ///
+    /// Only works for PDF documents.
+    pub fn rearrangePages(self: *Self, page_order: []const i32) Error!void {
+        const pdf_doc = self.asPdf() orelse return Error.NotAPdf;
+        const result = c.c.mupdf_shim_rearrange_pages(
+            self.ctx.ptr,
+            pdf_doc,
+            @intCast(page_order.len),
+            page_order.ptr,
+        );
+        if (result != 0) return Error.MupdfError;
+    }
+
+    /// Create a new empty PDF document.
+    pub fn createPdf(ctx: *Context) Error!Self {
+        const pdf_doc = c.c.mupdf_shim_create_pdf(ctx.ptr);
+        if (pdf_doc == null) return Error.MupdfError;
+        // pdf_document embeds fz_document as its first member — cast to fz_document*
+        const doc_ptr: *c.c.fz_document = @ptrCast(pdf_doc.?);
+        return Self{ .ptr = doc_ptr, .ctx = ctx };
+    }
+
     /// Get the raw MuPDF document pointer.
     pub fn raw(self: *Self) *c.c.fz_document {
         return self.ptr;
@@ -2241,4 +2301,171 @@ test "Image.getResolution returns DPI info" {
     // Resolution should be positive (typically 72 or 96 DPI)
     try std.testing.expect(res.xres > 0);
     try std.testing.expect(res.yres > 0);
+}
+
+// ============================================
+// PDF Manipulation Tests (Phase 5)
+// ============================================
+
+const multipage_pdf_path = "tests/fixtures/multipage.pdf";
+
+test "Document.deletePage removes a page" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    // Open from memory so we don't modify the file
+    const allocator = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(allocator, multipage_pdf_path, 10 * 1024 * 1024);
+    defer allocator.free(data);
+
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+
+    try std.testing.expectEqual(@as(i32, 3), doc.pageCount());
+
+    try doc.deletePage(1); // Remove page 2 (0-indexed)
+
+    try std.testing.expectEqual(@as(i32, 2), doc.pageCount());
+}
+
+test "Document.deletePage rejects out of range" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    const allocator = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(allocator, multipage_pdf_path, 10 * 1024 * 1024);
+    defer allocator.free(data);
+
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+
+    try std.testing.expectError(Error.PageOutOfRange, doc.deletePage(10));
+    try std.testing.expectError(Error.PageOutOfRange, doc.deletePage(-1));
+}
+
+test "Document.deletePageRange removes multiple pages" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    const allocator = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(allocator, multipage_pdf_path, 10 * 1024 * 1024);
+    defer allocator.free(data);
+
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+
+    try std.testing.expectEqual(@as(i32, 3), doc.pageCount());
+
+    try doc.deletePageRange(0, 2); // Remove pages 0 and 1
+
+    try std.testing.expectEqual(@as(i32, 1), doc.pageCount());
+}
+
+test "Document.rearrangePages reorders pages" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    const allocator = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(allocator, multipage_pdf_path, 10 * 1024 * 1024);
+    defer allocator.free(data);
+
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+
+    try std.testing.expectEqual(@as(i32, 3), doc.pageCount());
+
+    // Reverse page order: [2, 1, 0]
+    try doc.rearrangePages(&[_]i32{ 2, 1, 0 });
+
+    try std.testing.expectEqual(@as(i32, 3), doc.pageCount());
+}
+
+test "Document.rearrangePages can remove pages" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    const allocator = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(allocator, multipage_pdf_path, 10 * 1024 * 1024);
+    defer allocator.free(data);
+
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+
+    // Keep only pages 0 and 2
+    try doc.rearrangePages(&[_]i32{ 0, 2 });
+
+    try std.testing.expectEqual(@as(i32, 2), doc.pageCount());
+}
+
+test "Document.rearrangePages can duplicate pages" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    const allocator = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(allocator, multipage_pdf_path, 10 * 1024 * 1024);
+    defer allocator.free(data);
+
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+
+    // Duplicate page 0
+    try doc.rearrangePages(&[_]i32{ 0, 0, 1, 2 });
+
+    try std.testing.expectEqual(@as(i32, 4), doc.pageCount());
+}
+
+test "Document.insertPageFrom copies page from another document" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    const allocator = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(allocator, multipage_pdf_path, 10 * 1024 * 1024);
+    defer allocator.free(data);
+
+    var src = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer src.deinit();
+
+    // Create a new empty PDF as destination
+    var dst = try Document.createPdf(&ctx);
+    defer dst.deinit();
+
+    try std.testing.expectEqual(@as(i32, 0), dst.pageCount());
+
+    // Copy page 0 from source to destination
+    try dst.insertPageFrom(-1, &src, 0);
+
+    try std.testing.expectEqual(@as(i32, 1), dst.pageCount());
+}
+
+test "Document.insertPageFrom merges multiple pages" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    const allocator = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(allocator, multipage_pdf_path, 10 * 1024 * 1024);
+    defer allocator.free(data);
+
+    var src = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer src.deinit();
+
+    var dst = try Document.createPdf(&ctx);
+    defer dst.deinit();
+
+    // Copy all 3 pages
+    try dst.insertPageFrom(-1, &src, 0);
+    try dst.insertPageFrom(-1, &src, 1);
+    try dst.insertPageFrom(-1, &src, 2);
+
+    try std.testing.expectEqual(@as(i32, 3), dst.pageCount());
+}
+
+test "Document.createPdf creates empty document" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    var doc = try Document.createPdf(&ctx);
+    defer doc.deinit();
+
+    try std.testing.expectEqual(@as(i32, 0), doc.pageCount());
+    try std.testing.expect(doc.isPdf());
 }
