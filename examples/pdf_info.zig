@@ -57,12 +57,15 @@ pub fn main() !void {
         std.debug.print("Password Protected: No\n", .{});
     }
 
-    // Metadata (if available)
-    if (doc.getTitle()) |title| {
+    // Metadata
+    const alloc = std.heap.page_allocator;
+    if (try doc.getMetadata(.title, alloc)) |title| {
+        defer alloc.free(title);
         std.debug.print("Title: {s}\n", .{title});
     }
 
-    if (doc.getAuthor()) |author| {
+    if (try doc.getMetadata(.author, alloc)) |author| {
+        defer alloc.free(author);
         std.debug.print("Author: {s}\n", .{author});
     }
 

@@ -376,26 +376,6 @@ pub const Document = struct {
         return c.c.fz_authenticate_password(self.ctx.ptr, self.ptr, &pass_buf) != 0;
     }
 
-    /// Get the document title, if available.
-    /// Note: Returns null - proper implementation requires allocator.
-    /// TODO: Add proper metadata extraction with allocator.
-    pub fn getTitle(self: *Self) ?[]const u8 {
-        _ = self;
-        // fz_lookup_metadata writes to a buffer and returns length
-        // For a proper implementation, we'd need an allocator
-        return null;
-    }
-
-    /// Get the document author, if available.
-    /// Note: Returns null - proper implementation requires allocator.
-    /// TODO: Add proper metadata extraction with allocator.
-    pub fn getAuthor(self: *Self) ?[]const u8 {
-        _ = self;
-        // fz_lookup_metadata writes to a buffer and returns length
-        // For a proper implementation, we'd need an allocator
-        return null;
-    }
-
     /// Get a metadata value by key.
     ///
     /// Returns the metadata value as an owned slice that must be freed by the caller,
