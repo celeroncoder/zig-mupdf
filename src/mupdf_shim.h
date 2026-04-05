@@ -192,4 +192,44 @@ void mupdf_shim_set_annot_quad_points(fz_context *ctx, pdf_annot *annot, int n, 
 /* Update annotation appearance. Returns 0 on success. */
 int mupdf_shim_update_annot(fz_context *ctx, pdf_annot *annot);
 
+/* ============================================
+ * Outline / TOC functions
+ * ============================================ */
+
+/* Load the document outline (TOC). Returns NULL if none. Caller must drop. */
+fz_outline *mupdf_shim_load_outline(fz_context *ctx, fz_document *doc);
+
+/* Outline accessor functions (fz_outline has bitfields) */
+const char *mupdf_shim_outline_title(fz_outline *outline);
+const char *mupdf_shim_outline_uri(fz_outline *outline);
+int mupdf_shim_outline_page(fz_context *ctx, fz_document *doc, fz_outline *outline);
+int mupdf_shim_outline_is_open(fz_outline *outline);
+fz_outline *mupdf_shim_outline_next(fz_outline *outline);
+fz_outline *mupdf_shim_outline_down(fz_outline *outline);
+
+/* ============================================
+ * Form widget functions
+ * ============================================ */
+
+/* Get first widget on a page. Returns NULL if none. */
+pdf_annot *mupdf_shim_first_widget(fz_context *ctx, pdf_page *page);
+
+/* Get next widget. Returns NULL at end. */
+pdf_annot *mupdf_shim_next_widget(fz_context *ctx, pdf_annot *widget);
+
+/* Get widget type (returns enum pdf_widget_type). */
+int mupdf_shim_widget_type(fz_context *ctx, pdf_annot *widget);
+
+/* Get widget/field label. Returns "" on error. */
+const char *mupdf_shim_widget_label(fz_context *ctx, pdf_annot *widget);
+
+/* Get widget/field value. Returns "" on error. */
+const char *mupdf_shim_widget_value(fz_context *ctx, pdf_annot *widget);
+
+/* Check if widget is read-only. */
+int mupdf_shim_widget_is_readonly(fz_context *ctx, pdf_annot *widget);
+
+/* Get widget bounding rect. */
+fz_rect mupdf_shim_widget_rect(fz_context *ctx, pdf_annot *widget);
+
 #endif /* MUPDF_SHIM_H */

@@ -538,6 +538,16 @@ pub const Document = struct {
         return c.c.pdf_specifics(self.ctx.ptr, self.ptr);
     }
 
+    /// Load the document outline (Table of Contents).
+    ///
+    /// Returns null if the document has no outline.
+    /// The caller must call `outline.deinit()` when done.
+    pub fn loadOutline(self: *Self) ?Outline {
+        const root = c.c.mupdf_shim_load_outline(self.ctx.ptr, self.ptr);
+        if (root == null) return null;
+        return Outline{ .root = root, .ctx_ptr = self.ctx.ptr, .doc_ptr = self.ptr };
+    }
+
     /// Delete a page by index (0-based).
     ///
     /// Only works for PDF documents.
@@ -712,6 +722,13 @@ pub const Page = struct {
             .ptr = pixmap.?,
             .ctx = self.doc.ctx,
         };
+    }
+
+    /// Iterate over form widgets on this page.
+    pub fn getWidgets(self: *Self) ?WidgetIterator {
+        const pdf_page = c.c.pdf_page_from_fz_page(self.doc.ctx.ptr, self.ptr);
+        if (pdf_page == null) return null;
+        return .{ .current = c.c.mupdf_shim_first_widget(self.doc.ctx.ptr, pdf_page), .ctx_ptr = self.doc.ctx.ptr };
     }
 
     /// Iterate over annotations on this page.
@@ -1295,6 +1312,133 @@ pub const AnnotationIterator = struct {
         const annot = self.current orelse return null;
         self.current = c.c.mupdf_shim_next_annot(self.ctx_ptr, annot);
         return .{ .ptr = annot, .ctx_ptr = self.ctx_ptr, .page_ptr = self.page_ptr };
+    }
+};
+
+/// A single entry in the document outline (Table of Contents).
+pub const OutlineItem = struct {
+    /// Item title text.
+    title: []const u8,
+    /// Destination URI (internal "#page=N" or external URL).
+    uri: []const u8,
+    /// Destination page number (0-based), or -1 if none.
+    page: i32,
+    /// Whether this item is expanded in the UI.
+    is_open: bool,
+    /// Whether this item has children.
+    has_children: bool,
+};
+
+/// Outline tree loaded from a document. Must be freed with `deinit`.
+pub const Outline = struct {
+    root: ?*c.c.fz_outline,
+    ctx_ptr: *c.c.fz_context,
+    doc_ptr: *c.c.fz_document,
+
+    /// Walk the outline tree, calling the callback for each item with its depth level.
+    /// Collects all items into a flat array with depth info.
+    pub fn toList(self: *const Outline, allocator: std.mem.Allocator) Error![]OutlineEntry {
+        var list = std.ArrayListUnmanaged(OutlineEntry){};
+        errdefer list.deinit(allocator);
+        self.collectItems(self.root, 0, &list, allocator) catch return Error.OutOfMemory;
+        return list.toOwnedSlice(allocator) catch return Error.OutOfMemory;
+    }
+
+    fn collectItems(self: *const Outline, node: ?*c.c.fz_outline, depth: u32, list: *std.ArrayListUnmanaged(OutlineEntry), allocator: std.mem.Allocator) !void {
+        var current = node;
+        while (current) |item| {
+            const title = c.c.mupdf_shim_outline_title(item);
+            const uri = c.c.mupdf_shim_outline_uri(item);
+            const page = c.c.mupdf_shim_outline_page(self.ctx_ptr, self.doc_ptr, item);
+            try list.append(allocator, .{
+                .item = .{
+                    .title = if (title) |t| std.mem.span(t) else "",
+                    .uri = if (uri) |u| std.mem.span(u) else "",
+                    .page = page,
+                    .is_open = c.c.mupdf_shim_outline_is_open(item) != 0,
+                    .has_children = c.c.mupdf_shim_outline_down(item) != null,
+                },
+                .depth = depth,
+            });
+            // Recurse into children
+            const down = c.c.mupdf_shim_outline_down(item);
+            if (down != null) {
+                try self.collectItems(down, depth + 1, list, allocator);
+            }
+            current = c.c.mupdf_shim_outline_next(item);
+        }
+    }
+
+    /// Release the outline tree.
+    pub fn deinit(self: *Outline) void {
+        if (self.root) |r| {
+            c.c.fz_drop_outline(self.ctx_ptr, r);
+            self.root = null;
+        }
+    }
+};
+
+/// An outline entry with its depth in the tree.
+pub const OutlineEntry = struct {
+    item: OutlineItem,
+    depth: u32,
+};
+
+/// Form widget types.
+pub const WidgetType = enum(i32) {
+    unknown = 0,
+    button = 1,
+    checkbox = 2,
+    combobox = 3,
+    listbox = 4,
+    radiobutton = 5,
+    signature = 6,
+    text = 7,
+};
+
+/// A form field/widget on a page.
+pub const Widget = struct {
+    ptr: *c.c.pdf_annot,
+    ctx_ptr: *c.c.fz_context,
+
+    /// Get the widget type.
+    pub fn getType(self: *const Widget) WidgetType {
+        return std.meta.intToEnum(WidgetType, c.c.mupdf_shim_widget_type(self.ctx_ptr, self.ptr)) catch .unknown;
+    }
+
+    /// Get the field label/name.
+    pub fn getLabel(self: *const Widget) []const u8 {
+        const s = c.c.mupdf_shim_widget_label(self.ctx_ptr, self.ptr);
+        return if (s) |p| std.mem.span(p) else "";
+    }
+
+    /// Get the current field value.
+    pub fn getValue(self: *const Widget) []const u8 {
+        const s = c.c.mupdf_shim_widget_value(self.ctx_ptr, self.ptr);
+        return if (s) |p| std.mem.span(p) else "";
+    }
+
+    /// Check if the widget is read-only.
+    pub fn isReadOnly(self: *const Widget) bool {
+        return c.c.mupdf_shim_widget_is_readonly(self.ctx_ptr, self.ptr) != 0;
+    }
+
+    /// Get the bounding rectangle.
+    pub fn getRect(self: *const Widget) Rect {
+        const r = c.c.mupdf_shim_widget_rect(self.ctx_ptr, self.ptr);
+        return .{ .x0 = r.x0, .y0 = r.y0, .x1 = r.x1, .y1 = r.y1 };
+    }
+};
+
+/// Iterator over form widgets on a page.
+pub const WidgetIterator = struct {
+    current: ?*c.c.pdf_annot,
+    ctx_ptr: *c.c.fz_context,
+
+    pub fn next(self: *WidgetIterator) ?Widget {
+        const w = self.current orelse return null;
+        self.current = c.c.mupdf_shim_next_widget(self.ctx_ptr, w);
+        return .{ .ptr = w, .ctx_ptr = self.ctx_ptr };
     }
 };
 
@@ -2736,4 +2880,105 @@ test "AnnotationType enum values" {
     try std.testing.expectEqual(@as(i32, 9), @intFromEnum(AnnotationType.underline));
     try std.testing.expectEqual(@as(i32, 11), @intFromEnum(AnnotationType.strike_out));
     try std.testing.expectEqual(@as(i32, -1), @intFromEnum(AnnotationType.unknown));
+}
+
+// ============================================
+// Outline / TOC Tests (Phase 7)
+// ============================================
+
+test "Document.loadOutline returns null for document without TOC" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    const al = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(al, multipage_pdf_path, 10 * 1024 * 1024);
+    defer al.free(data);
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+
+    // Our simple test PDFs have no outline
+    try std.testing.expect(doc.loadOutline() == null);
+}
+
+test "Document.loadOutline works with example.pdf" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    const al = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(al, "examples/example.pdf", 10 * 1024 * 1024);
+    defer al.free(data);
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+
+    var outline_opt = doc.loadOutline();
+    if (outline_opt) |_| {
+        defer outline_opt.?.deinit();
+        const entries = try outline_opt.?.toList(al);
+        defer al.free(entries);
+
+        if (entries.len > 0) {
+            try std.testing.expect(entries[0].item.title.len > 0);
+            try std.testing.expectEqual(@as(u32, 0), entries[0].depth);
+        }
+    }
+}
+
+test "Outline.toList returns flat list with depth" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    const al = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(al, "examples/example.pdf", 10 * 1024 * 1024);
+    defer al.free(data);
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+
+    var outline_opt = doc.loadOutline();
+    if (outline_opt) |_| {
+        defer outline_opt.?.deinit();
+        const entries = try outline_opt.?.toList(al);
+        defer al.free(entries);
+
+        for (entries) |entry| {
+            try std.testing.expect(entry.depth < 20);
+        }
+    }
+}
+
+// ============================================
+// Widget / Form Field Tests (Phase 7)
+// ============================================
+
+test "Page.getWidgets returns iterator for page without forms" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    const al = std.testing.allocator;
+    const data = try std.fs.cwd().readFileAlloc(al, multipage_pdf_path, 10 * 1024 * 1024);
+    defer al.free(data);
+    var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
+    defer doc.deinit();
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+
+    var iter_opt = page.getWidgets();
+    if (iter_opt) |_| {
+        try std.testing.expect(iter_opt.?.next() == null);
+    }
+}
+
+test "WidgetType enum values" {
+    try std.testing.expectEqual(@as(i32, 0), @intFromEnum(WidgetType.unknown));
+    try std.testing.expectEqual(@as(i32, 2), @intFromEnum(WidgetType.checkbox));
+    try std.testing.expectEqual(@as(i32, 7), @intFromEnum(WidgetType.text));
+}
+
+test "OutlineItem struct has correct fields" {
+    const item = OutlineItem{
+        .title = "Chapter 1",
+        .uri = "#page=0",
+        .page = 0,
+        .is_open = true,
+        .has_children = false,
+    };
+    try std.testing.expectEqualStrings("Chapter 1", item.title);
+    try std.testing.expectEqual(@as(i32, 0), item.page);
+    try std.testing.expect(item.is_open);
+    try std.testing.expect(!item.has_children);
 }

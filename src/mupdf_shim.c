@@ -558,3 +558,111 @@ int mupdf_shim_update_annot(fz_context *ctx, pdf_annot *annot)
     fz_catch(ctx) { result = -1; }
     return result;
 }
+
+/* ============================================
+ * Outline / TOC functions
+ * ============================================ */
+
+fz_outline *mupdf_shim_load_outline(fz_context *ctx, fz_document *doc)
+{
+    fz_outline *outline = NULL;
+    fz_try(ctx) { outline = fz_load_outline(ctx, doc); }
+    fz_catch(ctx) { outline = NULL; }
+    return outline;
+}
+
+const char *mupdf_shim_outline_title(fz_outline *outline)
+{
+    return outline && outline->title ? outline->title : "";
+}
+
+const char *mupdf_shim_outline_uri(fz_outline *outline)
+{
+    return outline && outline->uri ? outline->uri : "";
+}
+
+int mupdf_shim_outline_page(fz_context *ctx, fz_document *doc, fz_outline *outline)
+{
+    if (!outline) return -1;
+    int page = -1;
+    fz_try(ctx) {
+        page = fz_page_number_from_location(ctx, doc, outline->page);
+    }
+    fz_catch(ctx) { page = -1; }
+    return page;
+}
+
+int mupdf_shim_outline_is_open(fz_outline *outline)
+{
+    return outline ? outline->is_open : 0;
+}
+
+fz_outline *mupdf_shim_outline_next(fz_outline *outline)
+{
+    return outline ? outline->next : NULL;
+}
+
+fz_outline *mupdf_shim_outline_down(fz_outline *outline)
+{
+    return outline ? outline->down : NULL;
+}
+
+/* ============================================
+ * Form widget functions
+ * ============================================ */
+
+pdf_annot *mupdf_shim_first_widget(fz_context *ctx, pdf_page *page)
+{
+    pdf_annot *w = NULL;
+    fz_try(ctx) { w = pdf_first_widget(ctx, page); }
+    fz_catch(ctx) { w = NULL; }
+    return w;
+}
+
+pdf_annot *mupdf_shim_next_widget(fz_context *ctx, pdf_annot *widget)
+{
+    pdf_annot *w = NULL;
+    fz_try(ctx) { w = pdf_next_widget(ctx, widget); }
+    fz_catch(ctx) { w = NULL; }
+    return w;
+}
+
+int mupdf_shim_widget_type(fz_context *ctx, pdf_annot *widget)
+{
+    int t = 0;
+    fz_try(ctx) { t = (int)pdf_widget_type(ctx, widget); }
+    fz_catch(ctx) { t = 0; }
+    return t;
+}
+
+const char *mupdf_shim_widget_label(fz_context *ctx, pdf_annot *widget)
+{
+    const char *s = "";
+    fz_try(ctx) { s = pdf_annot_field_label(ctx, widget); if (!s) s = ""; }
+    fz_catch(ctx) { s = ""; }
+    return s;
+}
+
+const char *mupdf_shim_widget_value(fz_context *ctx, pdf_annot *widget)
+{
+    const char *s = "";
+    fz_try(ctx) { s = pdf_annot_field_value(ctx, widget); if (!s) s = ""; }
+    fz_catch(ctx) { s = ""; }
+    return s;
+}
+
+int mupdf_shim_widget_is_readonly(fz_context *ctx, pdf_annot *widget)
+{
+    int ro = 0;
+    fz_try(ctx) { ro = pdf_widget_is_readonly(ctx, widget); }
+    fz_catch(ctx) { ro = 0; }
+    return ro;
+}
+
+fz_rect mupdf_shim_widget_rect(fz_context *ctx, pdf_annot *widget)
+{
+    fz_rect r = fz_empty_rect;
+    fz_try(ctx) { r = pdf_bound_widget(ctx, widget); }
+    fz_catch(ctx) { r = fz_empty_rect; }
+    return r;
+}

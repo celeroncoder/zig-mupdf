@@ -85,6 +85,12 @@ pub const Annotation = @import("document.zig").Annotation;
 pub const AnnotationType = @import("document.zig").AnnotationType;
 pub const AnnotationIterator = @import("document.zig").AnnotationIterator;
 pub const Color = @import("document.zig").Color;
+pub const Outline = @import("document.zig").Outline;
+pub const OutlineItem = @import("document.zig").OutlineItem;
+pub const OutlineEntry = @import("document.zig").OutlineEntry;
+pub const Widget = @import("document.zig").Widget;
+pub const WidgetType = @import("document.zig").WidgetType;
+pub const WidgetIterator = @import("document.zig").WidgetIterator;
 
 // Error handling
 pub const Error = @import("error.zig").Error;
