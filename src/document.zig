@@ -343,7 +343,7 @@ pub const Document = struct {
 
     /// Close the document and release resources.
     pub fn deinit(self: *Self) void {
-        c.c.fz_drop_document(self.ctx.ptr, self.ptr);
+        c.c.mupdf_shim_drop_document(self.ctx.ptr, self.ptr);
         self.ptr = undefined;
     }
 

@@ -11,6 +11,13 @@
 //! its own `clone()`. Clones share the resource store and font cache. Each
 //! document/page must only be used by the context (thread) that opened it.
 //!
+//! Caveat (MuPDF 1.28): the shared store compares un-hashed keys across
+//! documents, so a lookup on one thread can read another thread's document
+//! while it is being dropped or repaired. `Document.deinit` purges a PDF's
+//! store entries before dropping it, which closes the drop-time window; for
+//! threads that each process unrelated, untrusted documents, independent
+//! `Context.init()` contexts per thread (no shared store) are the safest choice.
+//!
 //! ```zig
 //! var base = try Context.initThreadSafe();
 //! defer base.deinit(); // after all clones are gone

@@ -116,6 +116,23 @@ fz_document *mupdf_shim_open_document_with_buffer(fz_context *ctx, const char *m
     return doc;
 }
 
+void mupdf_shim_drop_document(fz_context *ctx, fz_document *doc)
+{
+    pdf_document *pdf = pdf_specifics(ctx, doc);
+    if (pdf)
+    {
+        fz_try(ctx)
+        {
+            pdf_empty_store(ctx, pdf);
+        }
+        fz_catch(ctx)
+        {
+            /* Nothing to undo; fz_drop_document empties the store again. */
+        }
+    }
+    fz_drop_document(ctx, doc);
+}
+
 int mupdf_shim_register_document_handlers(fz_context *ctx)
 {
     int result = 0;

@@ -284,3 +284,141 @@ Throughput now scales with the cores available. This VM has **2 vCPUs**, so the 
 Thread-safety soak (Debug build, safety checks on, `--workers 4`): 120 requests each of `/render`, `/text`, `/search`, `/info` at c=8 gave 0 errors, 0 panics, and the server stayed alive.
 
 `zig build test --summary all`: `108/108 tests passed`.
+
+---
+
+## Issue 3 (HIGH): one idle connection blocks the whole server (slowloris)
+
+### Reproduce
+
+Command: `scripts/repro/issue3_slowloris.sh 8080 8`. It runs 7 cases:
+* (A) open 8 idle sockets with `exec N<>/dev/tcp/…` (4× the worker count), then `curl -m 3 /health`
+* (B) stalled partial request line
+* (C) `Content-Length: 100000` with only 10 body bytes, then the client half-closes
+* (D) the same as C, but the client stalls instead
+* (E) 64 KiB header with no terminator
+* (F) `Content-Length: abc`
+* (G) a slowloris that trickles one header byte every 0.5 s
+
+Before (built from the Issue-2 commit `9c4fb3f`, so 2 workers are already in place):
+```
+  zig-mupdf server on http://localhost:8081 (2 workers)
+== A) 8 idle sockets, then GET /health with curl -m 3 ==
+  curl exit=28 time=3.03s  http=000
+== B) stalled partial request line (sent 'POST /te', then nothing) ==
+  after 20.0s: connection still-open, response: <no response>
+== C) Content-Length: 100000 but only 10 body bytes, then client half-closes ==
+  after 0.0s: HTTP/1.1 400 Bad Request  body={"error":"Failed to open PDF"}
+== D) Content-Length: 100000 but only 10 body bytes, client stalls ==
+  after 20.0s: connection still-open, response: <no response>
+== E) 64 KiB of header without terminator ==
+  after 0.0s: <no response>
+== F) Content-Length: abc ==
+  after 0.0s: HTTP/1.1 400 Bad Request  body={"error":"No file"}
+== G) trickle one header byte every 0.5s for up to 30s ==
+  after 30.1s: connection still-open
+server alive: yes
+final /health http=200
+RESULT: FAIL
+```
+The thread pool alone doesn't help: 8 idle sockets pin both workers forever. C and F "work" only by accident. The 10 truncated body bytes (C) and the empty body after `Content-Length: abc` was read as 0 (F) are handed to MuPDF as a PDF. That is the `recv(MSG_WAITALL)`-returned-short bug.
+
+### Fix (`examples/server.zig`)
+
+* **Workers never read from sockets.** The main thread runs a non-blocking `poll()` loop that accepts connections and buffers each request. Only complete requests are queued to the worker pool, so an idle client costs an fd and a small buffer, not a worker.
+* **Deadlines** (`--read-timeout-ms`, default 10 000): the request head must arrive within the timeout from accept. This is a total deadline, which defeats trickling (G). The body must make progress at least once per timeout. A stalled client gets `408` (or is just disconnected if it sent nothing).
+* **Limits:** `--max-header-bytes` (default 16 KiB) returns `431`. `--max-body-bytes` (default 50 MiB) returns `413`. `--max-connections` (default 1024) and `--queue` return `503` when full.
+* **Strict framing:** an invalid or conflicting `Content-Length` returns `400`. `Transfer-Encoding` returns `411`. EOF before `Content-Length` bytes have arrived returns `400 Incomplete request body`, so nothing truncated is ever parsed. The `recv(MSG_WAITALL)` path is removed.
+* `SO_RCVTIMEO` / `SO_SNDTIMEO` (`--read-timeout-ms` / `--write-timeout-ms`) are set on each socket before it reaches a worker. Responses use `writeAll` (the old single `write()` could send a truncated PNG).
+
+### A crash found while re-verifying, and its fix
+
+Re-running the Issue-2 load against this build segfaulted once in about three runs under CPU contention:
+```
+Segmentation fault at address 0x8
+source/pdf/pdf-xref.c:428  pdf_get_xref_entry_aux
+source/pdf/pdf-object.c:681 do_objcmp
+source/fitz/store.c:610    fz_find_item
+source/pdf/pdf-function.c:1474 pdf_load_function_imp
+...
+```
+This is an **upstream MuPDF 1.28 race between cloned contexts**. The resource store is shared by clones, and keys that are direct objects are not hashed, so `fz_find_item` linearly compares them using `pdf_objcmp`. That reads the *owning document's* xref (`DICT(a)->doc`), which can belong to another thread. Meanwhile `pdf_drop_document_imp` frees the xref (`pdf_drop_xref_sections`) **before** it calls `pdf_empty_store`, so another thread can compare against a half-dropped document. Issue 2's design (clones sharing one store) exposes this.
+
+Fix:
+1. **Library:** `Document.deinit` now calls `mupdf_shim_drop_document`, which runs `pdf_empty_store()` while the xref is still intact and then drops the document. With this, the replay that crashed survived 6/6 rounds under a CPU hog, versus a crash in 1 of 3 without it.
+2. **Server default: independent per-worker contexts** (`Context.initWithOptions`, store budget `--store-mb` split across workers), so no store is shared at all. The same cross-document compare can also read a document that its own thread is lazily repairing, and hostile input can trigger that repair; independent contexts rule this out completely. The Issue-2 design (one `initThreadSafe()` base plus `fz_clone_context` per worker) is still available as `--shared-store`.
+
+Hostile concurrent stress (`scripts/repro/hostile_concurrency.py`): 8 threads for 120 s post a mix of the real PDF and random mutants to `/render`, `/text`, `/info` (ReleaseFast with a segfault handler, 4 workers):
+```
+  zig-mupdf server on http://localhost:8086 (4 workers, per-worker store, read timeout 10000ms, write timeout 10000ms, max header 16384B)
+requests=22754 status_counts={200: 13567, 400: 8169, 422: 967, 500: 51} server_alive=True
+alive ()
+  zig-mupdf server on http://localhost:8086 (4 workers, shared store, read timeout 10000ms, write timeout 10000ms, max header 16384B)
+requests=16497 status_counts={200: 9835, 400: 5929, 422: 693, 500: 40} server_alive=True
+alive (--shared-store)
+```
+Neither mode crashed. The per-worker mode also completed 38% more requests (no store-lock contention).
+
+### Re-verify
+
+`scripts/repro/issue3_slowloris.sh 8080 8`:
+```
+  zig-mupdf server on http://localhost:8080 (2 workers, per-worker store, read timeout 10000ms, write timeout 10000ms, max header 16384B)
+== A) 8 idle sockets, then GET /health with curl -m 3 ==
+  curl exit=0 time=0.01s {"status":"ok","service":"zig-mupdf"} http=200
+== B) stalled partial request line (sent 'POST /te', then nothing) ==
+  after 10.0s: connection closed, response: HTTP/1.1 408 Request Timeout  body={"error":"Request not received in time"}
+== C) Content-Length: 100000 but only 10 body bytes, then client half-closes ==
+  after 0.0s: HTTP/1.1 400 Bad Request  body={"error":"Incomplete request body"}
+== D) Content-Length: 100000 but only 10 body bytes, client stalls ==
+  after 10.0s: connection closed, response: HTTP/1.1 408 Request Timeout  body={"error":"Request not received in time"}
+== E) 64 KiB of header without terminator ==
+  after 0.0s: HTTP/1.1 431 Request Header Fields Too Large  body={"error":"Request head too large"}
+== F) Content-Length: abc ==
+  after 0.0s: HTTP/1.1 400 Bad Request  body={"error":"Invalid Content-Length"}
+== G) trickle one header byte every 0.5s for up to 30s ==
+  after 10.0s: connection closed
+server alive: yes
+final /health http=200
+RESULT: PASS
+```
+With **200 idle sockets** and a 2 s timeout (`scripts/repro/issue3_slowloris.sh 8080 200 --read-timeout-ms 2000`):
+```
+  zig-mupdf server on http://localhost:8080 (2 workers, per-worker store, read timeout 2000ms, write timeout 10000ms, max header 16384B)
+== A) 200 idle sockets, then GET /health with curl -m 3 ==
+  curl exit=0 time=0.01s {"status":"ok","service":"zig-mupdf"} http=200
+== B) stalled partial request line (sent 'POST /te', then nothing) ==
+  after 2.0s: connection closed, response: HTTP/1.1 408 Request Timeout  body={"error":"Request not received in time"}
+== C) Content-Length: 100000 but only 10 body bytes, then client half-closes ==
+  after 0.0s: HTTP/1.1 400 Bad Request  body={"error":"Incomplete request body"}
+== D) Content-Length: 100000 but only 10 body bytes, client stalls ==
+  after 2.0s: connection closed, response: HTTP/1.1 408 Request Timeout  body={"error":"Request not received in time"}
+== E) 64 KiB of header without terminator ==
+  after 0.0s: HTTP/1.1 431 Request Header Fields Too Large  body={"error":"Request head too large"}
+== F) Content-Length: abc ==
+  after 0.0s: HTTP/1.1 400 Bad Request  body={"error":"Invalid Content-Length"}
+== G) trickle one header byte every 0.5s for up to 30s ==
+  after 2.0s: connection closed
+server alive: yes
+final /health http=200
+RESULT: PASS
+```
+Issue-2 check re-run on this build (`scripts/repro/issue2_concurrency.sh 8080`). Scaling improves further with independent contexts: `/text` now reaches 1.96× at c=2.
+```
+cpus: 2  server args: 8080 
+  zig-mupdf server on http://localhost:8080 (2 workers, per-worker store, read timeout 10000ms, write timeout 10000ms, max header 16384B)
+16x /render scale=2  serial: 1.31s (16 ok)   parallel: 0.72s (16 ok)   speedup: 1.83x
+-- closed-loop load (benchmarks/loadgen.py) --
+endpoint   conc    ok  err    req/s   p50 ms   p95 ms   p99 ms
+/render       1    32    0    11.53     84.3     97.8    103.5
+/render       2    32    0    21.01     85.6    124.4    128.4
+/render       4    32    0    20.66    173.1    216.5    224.6
+/render       8    32    0    20.71    337.3    359.4    359.9
+/text         1    64    0    53.33     18.0     20.6     23.5
+/text         2    64    0   104.33     18.2     19.4     20.0
+/text         4    64    0    86.68     36.9     56.2     59.7
+/text         8    64    0    82.71     74.1     81.4     81.7
+```
+`scripts/repro/issue1_uncaught_throw.sh` still passes. `zig build test --summary all`: `108/108 tests passed`.
+
+**Also found (not fixed: upstream MuPDF):** a Debug build of the server (`zig build run-server` without `-Doptimize`) panics on the shipped `examples/example.pdf` page 1 at scale 2, because UBSan flags a signed overflow in `source/fitz/draw-rasterize.c:251`. ReleaseSafe trap-mode UBSan also trips inside lcms2 (`cmslut.c:1446`, a function-pointer type check). This is the same class as the Issue-1 limitation. Use ReleaseFast for serving, or `-Dsanitize-mupdf=false`.

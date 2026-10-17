@@ -83,6 +83,12 @@ int mupdf_shim_lookup_metadata(fz_context *ctx, fz_document *doc, const char *ke
 /* Safely set metadata - returns 0 on success, -1 on error */
 int mupdf_shim_set_metadata(fz_context *ctx, fz_document *doc, const char *key, const char *value);
 
+/* Drop a document. For PDFs, first removes the document's keys from the
+ * (possibly shared) resource store while its xref is still intact: upstream
+ * pdf_drop_document frees the xref before emptying the store, so a cloned
+ * context in another thread could compare against a half-dropped key. */
+void mupdf_shim_drop_document(fz_context *ctx, fz_document *doc);
+
 /* Safely load a page - returns NULL on error */
 fz_page *mupdf_shim_load_page(fz_context *ctx, fz_document *doc, int page_num);
 
