@@ -484,3 +484,94 @@ RESULT: PASS
 Debug build (new default) fuzz: `scripts/repro/issue1_fuzz.sh 3000 5 tests/fixtures` gives `TOTAL: seeds=5 iterations_executed=15000 process_aborts=0`. A Debug server renders `example.pdf` pages 0–3 at scale 2 with `200 200 200 200` (page 1 used to panic).
 
 `zig build test --summary all`: `109/109 tests passed`.
+
+---
+
+## Issue 5 (MEDIUM): the benchmark is too narrow
+
+### Reproduce
+
+Command: `scripts/repro/issue5_benchmark_coverage.sh`. It checks that the suite measures req/s and p50/p95/p99 at c=1/2/4/8 for `/text` and `/render` against multi-worker uvicorn, plus an in-process engine comparison.
+
+Before:
+```
+MISSING concurrency benchmark script
+MISSING   measures req/s and p50/p95/p99
+MISSING   concurrency levels 1,2,4,8
+MISSING   /text and /render
+MISSING   uvicorn --workers N (N = CPU count)
+MISSING in-process engine benchmark (Zig)
+MISSING in-process engine benchmark (PyMuPDF)
+MISSING report has machine specs + concurrency
+RESULT: FAIL
+```
+
+### Fix
+
+* `benchmarks/loadgen.py`: closed-loop load generator (pre-encoded multipart body, thread per in-flight request, req/s + p50/p95/p99).
+* `benchmarks/concurrency_benchmark.py`: starts `mupdf-server --workers N` and `uvicorn python_server:app --workers N` (N = `os.cpu_count()`), then sweeps c = 1, 2, 4, 8 on `/text` and `/render`.
+* `benchmarks/engine_bench.zig` (`zig build bench-engine`) plus `benchmarks/engine_benchmark.py`: in-process open / text / render+PNG with the same operations in both libraries, no HTTP.
+* `benchmarks/BENCHMARK_REPORT.md` regenerated with today's numbers, machine specs, methodology, and the cases where Zig doesn't win. `requirements.txt` updated to the versions actually used (PyMuPDF 1.28 to match the vendored MuPDF 1.28).
+
+### Re-verify
+
+```
+ok    concurrency benchmark script
+ok      measures req/s and p50/p95/p99
+ok      concurrency levels 1,2,4,8
+ok      /text and /render
+ok      uvicorn --workers N (N = CPU count)
+ok    in-process engine benchmark (Zig)
+ok    in-process engine benchmark (PyMuPDF)
+ok    report has machine specs + concurrency
+RESULT: PASS
+```
+Results (full tables in `benchmarks/BENCHMARK_REPORT.md`):
+
+Concurrency, 2 workers each:
+```
+workers per server: 2 (cpu_count=2), pdf=example.pdf
+endpoint  conc server      req/s   p50 ms   p95 ms   p99 ms  err
+/text        1 zig         54.33     18.0     20.6     22.9    0
+/text        1 pymupdf     40.10     24.4     27.8     30.9    0
+/text        2 zig        100.60     18.3     23.1     42.0    0
+/text        2 pymupdf     64.27     25.9     47.8     61.3    0
+/text        4 zig         95.16     37.2     59.4     72.1    0
+/text        4 pymupdf     72.70     50.8     91.4     99.1    0
+/text        8 zig         89.42     75.0    121.5    131.4    0
+/text        8 pymupdf     72.00    100.2    159.6    170.7    0
+/render      1 zig         11.49     85.5     94.1    102.7    0
+/render      1 pymupdf     10.45     94.6    100.5    111.7    0
+/render      2 zig         20.54     85.8    134.7    147.4    0
+/render      2 pymupdf     16.79     97.4    185.6    187.5    0
+/render      4 zig         20.21    171.5    248.5    255.7    0
+/render      4 pymupdf     18.51    187.6    369.6    397.1    0
+/render      8 zig         19.91    348.6    488.0    499.6    0
+/render      8 pymupdf     17.85    386.5    599.3    721.8    0
+```
+
+In-process engine:
+```
+PDF: example.pdf page 0, 50 iterations, PyMuPDF 1.28.2 (MuPDF 1.28.2)
+operation         zig median  py median   zig p95    py p95  py/zig
+open                  2.45ms     2.37ms    3.10ms    2.71ms   0.97x
+text                 16.12ms    18.34ms   17.85ms   19.23ms   1.14x
+render_1x_png        40.01ms    40.08ms   46.12ms   51.30ms   1.00x
+render_2x_png        81.56ms    85.15ms   88.33ms   93.37ms   1.04x
+```
+
+Sequential (original `benchmark.py`):
+```
+  Endpoint                         Zig (ms)  Python (ms)    Speedup
+  ------------------------------ ---------- ------------ ----------
+  GET /health                          0.70         0.89       1.3x
+  POST /info                           5.17         9.73       1.9x
+  POST /text (page 0)                 18.34        23.75       1.3x
+  POST /text (page 35)                18.36        23.61       1.3x
+  POST /search (common word)          19.06        28.69       1.5x
+  POST /search (rare word)            19.82        25.22       1.3x
+  POST /render (1x)                   45.79        48.17       1.1x
+  POST /render (2x)                   89.24        93.93       1.1x
+
+  Geometric mean speedup: 1.3x faster (zig-mupdf vs PyMuPDF)
+```

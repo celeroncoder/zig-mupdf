@@ -928,4 +928,32 @@ pub fn build(b: *std.Build) void {
 
     const fuzz_step = b.step("fuzz", "Run the mutation fuzz loop (args: iterations seed corpus_dir)");
     fuzz_step.dependOn(&run_fuzz.step);
+
+    // ============================================
+    // In-process engine benchmark
+    // ============================================
+    const bench_module = b.createModule(.{
+        .root_source_file = b.path("benchmarks/engine_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    bench_module.addImport("mupdf", mupdf_module);
+
+    const bench_exe = b.addExecutable(.{
+        .name = "mupdf-engine-bench",
+        .root_module = bench_module,
+    });
+
+    b.installArtifact(bench_exe);
+
+    const run_bench = b.addRunArtifact(bench_exe);
+    run_bench.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        run_bench.addArgs(args);
+    }
+
+    const bench_step = b.step("bench-engine", "Run the in-process engine benchmark (args: pdf iterations page)");
+    bench_step.dependOn(&run_bench.step);
 }
