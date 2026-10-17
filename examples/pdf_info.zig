@@ -47,11 +47,14 @@ pub fn main() !void {
     }
 
     // Page count
-    const page_count = doc.pageCount();
+    const page_count = doc.pageCount() catch |err| {
+        std.debug.print("Failed to count pages: {s}\n", .{mupdf.formatError(err)});
+        return;
+    };
     std.debug.print("Pages: {d}\n", .{page_count});
 
     // Check for password protection
-    if (doc.needsPassword()) {
+    if (doc.needsPassword() catch false) {
         std.debug.print("Password Protected: Yes\n", .{});
     } else {
         std.debug.print("Password Protected: No\n", .{});
@@ -81,8 +84,12 @@ pub fn main() !void {
         };
         defer page.deinit();
 
-        const w = page.width();
-        const h = page.height();
+        const b = page.bounds() catch |err| {
+            std.debug.print("Page {d}: Failed to read bounds - {s}\n", .{ i + 1, mupdf.formatError(err) });
+            continue;
+        };
+        const w = b.width();
+        const h = b.height();
 
         // Convert points to inches (72 points = 1 inch)
         const w_in = w / 72.0;

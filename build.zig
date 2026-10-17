@@ -4,6 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Zig enables UBSan for C code in Debug builds. Upstream MuPDF is not
+    // UBSan-clean (e.g. qsort(NULL, 0) and signed shifts on malformed input),
+    // so a Debug build panics on some hostile PDFs that ReleaseFast handles.
+    // `-Dsanitize-mupdf=false` turns UBSan off for the vendored C code only.
+    const sanitize_mupdf = b.option(bool, "sanitize-mupdf", "Compile vendored MuPDF C code with UBSan (default: Zig's per-optimize-mode default)");
+
     // Path to vendored MuPDF
     const mupdf_path: std.Build.LazyPath = b.path(".context/mupdf");
 
@@ -14,6 +20,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .sanitize_c = if (sanitize_mupdf) |on| (if (on) .full else .off) else null,
     });
 
     // ============================================
@@ -892,4 +899,32 @@ pub fn build(b: *std.Build) void {
 
     const run_server_step = b.step("run-server", "Run the zig-mupdf HTTP server");
     run_server_step.dependOn(&run_server.step);
+
+    // ============================================
+    // Fuzz loop executable
+    // ============================================
+    const fuzz_module = b.createModule(.{
+        .root_source_file = b.path("tests/fuzz.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    fuzz_module.addImport("mupdf", mupdf_module);
+
+    const fuzz_exe = b.addExecutable(.{
+        .name = "mupdf-fuzz",
+        .root_module = fuzz_module,
+    });
+
+    b.installArtifact(fuzz_exe);
+
+    const run_fuzz = b.addRunArtifact(fuzz_exe);
+    run_fuzz.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        run_fuzz.addArgs(args);
+    }
+
+    const fuzz_step = b.step("fuzz", "Run the mutation fuzz loop (args: iterations seed corpus_dir)");
+    fuzz_step.dependOn(&run_fuzz.step);
 }

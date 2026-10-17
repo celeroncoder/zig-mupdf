@@ -187,7 +187,11 @@ fn handleInfo(stream: std.net.Stream, form: FormData) void {
     };
     defer doc.deinit();
 
-    const page_count = doc.pageCount();
+    const page_count = doc.pageCount() catch {
+        sendError(stream, "422 Unprocessable Entity", "Malformed page tree");
+        return;
+    };
+    const needs_password = doc.needsPassword() catch true;
 
     var metadata = doc.getAllMetadata(allocator) catch {
         sendError(stream, "500 Internal Server Error", "Metadata read failed");
@@ -213,8 +217,9 @@ fn handleInfo(stream: std.net.Stream, form: FormData) void {
     while (i < show) : (i += 1) {
         var page = doc.loadPage(i) catch continue;
         defer page.deinit();
-        if (i > 0) { pages_buf[pl] = ','; pl += 1; }
-        const e = std.fmt.bufPrint(pages_buf[pl..], "{{\"page\":{d},\"width\":{d:.1},\"height\":{d:.1},\"rotation\":{d}}}", .{ i, page.width(), page.height(), page.rotation() }) catch break;
+        const b = page.bounds() catch continue;
+        if (pl > 1) { pages_buf[pl] = ','; pl += 1; }
+        const e = std.fmt.bufPrint(pages_buf[pl..], "{{\"page\":{d},\"width\":{d:.1},\"height\":{d:.1},\"rotation\":{d}}}", .{ i, b.width(), b.height(), page.rotation() }) catch break;
         pl += e.len;
     }
     pages_buf[pl] = ']';
@@ -222,7 +227,7 @@ fn handleInfo(stream: std.net.Stream, form: FormData) void {
 
     var resp_buf: [32768]u8 = undefined;
     const body = std.fmt.bufPrint(&resp_buf, "{{\"page_count\":{d},\"is_pdf\":{},\"needs_password\":{},\"format\":\"{s}\",\"title\":\"{s}\",\"author\":\"{s}\",\"subject\":\"{s}\",\"creator\":\"{s}\",\"producer\":\"{s}\",\"pages\":{s}}}", .{
-        page_count, doc.isPdf(), doc.needsPassword(), format, title, author_val, subject, creator_val, producer, pages_buf[0..pl],
+        page_count, doc.isPdf(), needs_password, format, title, author_val, subject, creator_val, producer, pages_buf[0..pl],
     }) catch { sendError(stream, "500 Internal Server Error", "Response too large"); return; };
 
     sendJson(stream, body);
@@ -237,7 +242,8 @@ fn handleText(stream: std.net.Stream, form: FormData) void {
     };
     defer doc.deinit();
 
-    if (form.page < 0 or form.page >= doc.pageCount()) {
+    const page_count = doc.pageCount() catch { sendError(stream, "422 Unprocessable Entity", "Malformed page tree"); return; };
+    if (form.page < 0 or form.page >= page_count) {
         sendError(stream, "400 Bad Request", "Page out of range"); return;
     }
 
@@ -272,7 +278,8 @@ fn handleSearch(stream: std.net.Stream, form: FormData) void {
     var doc = mupdf.Document.openFromMemory(ctx, file_data, "application/pdf") catch { sendError(stream, "400 Bad Request", "Failed to open PDF"); return; };
     defer doc.deinit();
 
-    if (form.page < 0 or form.page >= doc.pageCount()) { sendError(stream, "400 Bad Request", "Page out of range"); return; }
+    const page_count = doc.pageCount() catch { sendError(stream, "422 Unprocessable Entity", "Malformed page tree"); return; };
+    if (form.page < 0 or form.page >= page_count) { sendError(stream, "400 Bad Request", "Page out of range"); return; }
 
     var page = doc.loadPage(form.page) catch { sendError(stream, "500 Internal Server Error", "Load failed"); return; };
     defer page.deinit();
@@ -309,7 +316,8 @@ fn handleRender(stream: std.net.Stream, form: FormData) void {
     defer doc.deinit();
     const t_open = timer.lap();
 
-    if (form.page < 0 or form.page >= doc.pageCount()) { sendError(stream, "400 Bad Request", "Page out of range"); return; }
+    const page_count = doc.pageCount() catch { sendError(stream, "422 Unprocessable Entity", "Malformed page tree"); return; };
+    if (form.page < 0 or form.page >= page_count) { sendError(stream, "400 Bad Request", "Page out of range"); return; }
 
     var page = doc.loadPage(form.page) catch { sendError(stream, "500 Internal Server Error", "Load failed"); return; };
     defer page.deinit();

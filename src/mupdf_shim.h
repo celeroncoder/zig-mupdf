@@ -62,8 +62,32 @@ fz_document *mupdf_shim_open_document_with_stream(fz_context *ctx, const char *m
 /* Safely open a document from a memory buffer - returns NULL on error */
 fz_document *mupdf_shim_open_document_with_buffer(fz_context *ctx, const char *magic, const unsigned char *data, size_t len);
 
+/* Safely register all compiled-in document handlers - returns 0 on success, -1 on error */
+int mupdf_shim_register_document_handlers(fz_context *ctx);
+
+/* Safely count pages - returns the page count, or -1 on error */
+int mupdf_shim_count_pages(fz_context *ctx, fz_document *doc);
+
+/* Safely check whether a password is needed - returns 0/1, or -1 on error */
+int mupdf_shim_needs_password(fz_context *ctx, fz_document *doc);
+
+/* Safely authenticate - returns fz_authenticate_password's result (0 = failed), or -1 on error */
+int mupdf_shim_authenticate_password(fz_context *ctx, fz_document *doc, const char *password);
+
+/* Value returned by mupdf_shim_lookup_metadata when MuPDF threw (distinct from -1 = key not found) */
+#define MUPDF_SHIM_METADATA_ERROR (-2)
+
+/* Safely look up metadata - returns size incl. NUL, -1 if not found, MUPDF_SHIM_METADATA_ERROR on error */
+int mupdf_shim_lookup_metadata(fz_context *ctx, fz_document *doc, const char *key, char *buf, size_t size);
+
+/* Safely set metadata - returns 0 on success, -1 on error */
+int mupdf_shim_set_metadata(fz_context *ctx, fz_document *doc, const char *key, const char *value);
+
 /* Safely load a page - returns NULL on error */
 fz_page *mupdf_shim_load_page(fz_context *ctx, fz_document *doc, int page_num);
+
+/* Safely get the page bounds (crop box) - returns 0 on success, -1 on error */
+int mupdf_shim_bound_page(fz_context *ctx, fz_page *page, fz_rect *out);
 
 /* Safely render page to pixmap - returns NULL on error */
 fz_pixmap *mupdf_shim_new_pixmap_from_page(fz_context *ctx, fz_page *page, fz_matrix ctm, fz_colorspace *cs, int alpha);
@@ -104,6 +128,9 @@ int mupdf_shim_page_images(fz_context *ctx, pdf_document *doc, pdf_page *page,
 
 /* Safely load an image from a PDF object by xref. Returns NULL on error. */
 fz_image *mupdf_shim_load_image(fz_context *ctx, pdf_document *doc, int xref);
+
+/* Safely save pixmap as a PNG file - returns 0 on success, -1 on error */
+int mupdf_shim_save_pixmap_as_png(fz_context *ctx, fz_pixmap *pixmap, const char *filename);
 
 /* Safely encode pixmap as PNG in memory - returns NULL on error */
 fz_buffer *mupdf_shim_pixmap_to_png(fz_context *ctx, fz_pixmap *pixmap);

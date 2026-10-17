@@ -57,8 +57,11 @@ pub const Context = struct {
             return Error.ContextCreationFailed;
         }
 
-        // Register all document handlers (PDF, XPS, EPUB, etc.)
-        c.c.fz_register_document_handlers(ctx);
+        // Register all compiled-in document handlers (see README "Supported formats")
+        if (c.c.mupdf_shim_register_document_handlers(ctx) != 0) {
+            c.c.fz_drop_context(ctx);
+            return Error.ContextCreationFailed;
+        }
 
         return Self{ .ptr = ctx.? };
     }

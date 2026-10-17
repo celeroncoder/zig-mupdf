@@ -11,7 +11,7 @@
 //! var doc = try ctx.openDocument("document.pdf");
 //! defer doc.deinit();
 //!
-//! const page_count = doc.pageCount();
+//! const page_count = try doc.pageCount();
 //! std.debug.print("Document has {d} pages\n", .{page_count});
 //!
 //! // Get metadata
@@ -348,8 +348,12 @@ pub const Document = struct {
     }
 
     /// Get the number of pages in the document.
-    pub fn pageCount(self: *Self) i32 {
-        return c.c.fz_count_pages(self.ctx.ptr, self.ptr);
+    ///
+    /// Fails if the page tree is malformed (e.g. a negative or impossible /Count).
+    pub fn pageCount(self: *Self) Error!i32 {
+        const count = c.c.mupdf_shim_count_pages(self.ctx.ptr, self.ptr);
+        if (count < 0) return Error.MupdfError;
+        return count;
     }
 
     /// Load a page by number (0-indexed).
@@ -358,14 +362,16 @@ pub const Document = struct {
     }
 
     /// Check if the document needs a password.
-    pub fn needsPassword(self: *Self) bool {
-        return c.c.fz_needs_password(self.ctx.ptr, self.ptr) != 0;
+    pub fn needsPassword(self: *Self) Error!bool {
+        const result = c.c.mupdf_shim_needs_password(self.ctx.ptr, self.ptr);
+        if (result < 0) return Error.MupdfError;
+        return result != 0;
     }
 
     /// Authenticate with a password.
     ///
-    /// Returns true if authentication succeeded.
-    pub fn authenticate(self: *Self, password: []const u8) bool {
+    /// Returns true if authentication succeeded, false for a wrong password.
+    pub fn authenticate(self: *Self, password: []const u8) Error!bool {
         var pass_buf: [256]u8 = undefined;
         if (password.len >= pass_buf.len) {
             return false;
@@ -373,7 +379,9 @@ pub const Document = struct {
         @memcpy(pass_buf[0..password.len], password);
         pass_buf[password.len] = 0;
 
-        return c.c.fz_authenticate_password(self.ctx.ptr, self.ptr, &pass_buf) != 0;
+        const result = c.c.mupdf_shim_authenticate_password(self.ctx.ptr, self.ptr, &pass_buf);
+        if (result < 0) return Error.MupdfError;
+        return result != 0;
     }
 
     /// Get a metadata value by key.
@@ -399,8 +407,9 @@ pub const Document = struct {
     pub fn getMetadataRaw(self: *Self, key: [:0]const u8, allocator: std.mem.Allocator) Error!?[]u8 {
         // First, query the required size
         var probe_buf: [1]u8 = undefined;
-        const required_size = c.c.fz_lookup_metadata(self.ctx.ptr, self.ptr, key.ptr, &probe_buf, 0);
+        const required_size = c.c.mupdf_shim_lookup_metadata(self.ctx.ptr, self.ptr, key.ptr, &probe_buf, 0);
 
+        if (required_size == c.c.MUPDF_SHIM_METADATA_ERROR) return Error.MupdfError;
         if (required_size < 0) {
             // Key not found
             return null;
@@ -418,8 +427,9 @@ pub const Document = struct {
         errdefer allocator.free(buf);
 
         // Actually retrieve the metadata
-        const actual_size = c.c.fz_lookup_metadata(self.ctx.ptr, self.ptr, key.ptr, buf.ptr, buf.len);
+        const actual_size = c.c.mupdf_shim_lookup_metadata(self.ctx.ptr, self.ptr, key.ptr, buf.ptr, buf.len);
 
+        if (actual_size == c.c.MUPDF_SHIM_METADATA_ERROR) return Error.MupdfError;
         if (actual_size < 0) {
             allocator.free(buf);
             return null;
@@ -522,7 +532,9 @@ pub const Document = struct {
         @memcpy(value_buf[0..value.len], value);
         value_buf[value.len] = 0;
 
-        c.c.fz_set_metadata(self.ctx.ptr, self.ptr, key.ptr, &value_buf);
+        if (c.c.mupdf_shim_set_metadata(self.ctx.ptr, self.ptr, key.ptr, &value_buf) != 0) {
+            return Error.MupdfError;
+        }
     }
 
     /// Check if this is a PDF document.
@@ -553,7 +565,7 @@ pub const Document = struct {
     /// Only works for PDF documents.
     pub fn deletePage(self: *Self, page_num: i32) Error!void {
         const pdf_doc = self.asPdf() orelse return Error.NotAPdf;
-        if (page_num < 0 or page_num >= self.pageCount()) return Error.PageOutOfRange;
+        if (page_num < 0 or page_num >= try self.pageCount()) return Error.PageOutOfRange;
         const result = c.c.mupdf_shim_delete_page(self.ctx.ptr, pdf_doc, page_num);
         if (result != 0) return Error.MupdfError;
     }
@@ -625,7 +637,7 @@ pub const Page = struct {
 
     /// Load a page from a document.
     pub fn load(doc: *Document, page_num: i32) Error!Self {
-        if (page_num < 0 or page_num >= doc.pageCount()) {
+        if (page_num < 0 or page_num >= try doc.pageCount()) {
             return Error.PageOutOfRange;
         }
 
@@ -648,8 +660,13 @@ pub const Page = struct {
     }
 
     /// Get the page bounding box.
-    pub fn bounds(self: *Self) Rect {
-        const rect = c.c.fz_bound_page(self.doc.ctx.ptr, self.ptr);
+    ///
+    /// Fails if the page's inherited attributes are malformed (e.g. a /Parent cycle).
+    pub fn bounds(self: *Self) Error!Rect {
+        var rect: c.c.fz_rect = undefined;
+        if (c.c.mupdf_shim_bound_page(self.doc.ctx.ptr, self.ptr, &rect) != 0) {
+            return Error.MupdfError;
+        }
         return Rect{
             .x0 = rect.x0,
             .y0 = rect.y0,
@@ -659,14 +676,14 @@ pub const Page = struct {
     }
 
     /// Get the page width in points.
-    pub fn width(self: *Self) f32 {
-        const b = self.bounds();
+    pub fn width(self: *Self) Error!f32 {
+        const b = try self.bounds();
         return b.x1 - b.x0;
     }
 
     /// Get the page height in points.
-    pub fn height(self: *Self) f32 {
-        const b = self.bounds();
+    pub fn height(self: *Self) Error!f32 {
+        const b = try self.bounds();
         return b.y1 - b.y0;
     }
 
@@ -1507,7 +1524,9 @@ pub const Pixmap = struct {
         @memcpy(path_buf[0..path.len], path);
         path_buf[path.len] = 0;
 
-        c.c.fz_save_pixmap_as_png(self.ctx.ptr, self.ptr, &path_buf);
+        if (c.c.mupdf_shim_save_pixmap_as_png(self.ctx.ptr, self.ptr, &path_buf) != 0) {
+            return Error.WriteFailed;
+        }
     }
 
     /// Encode the pixmap as PNG data in memory.
@@ -1577,7 +1596,7 @@ test "Document.pageCount returns correct count" {
     var doc = try Document.open(&ctx, test_pdf_path);
     defer doc.deinit();
 
-    const count = doc.pageCount();
+    const count = try doc.pageCount();
     try std.testing.expectEqual(@as(i32, 2), count);
 }
 
@@ -1588,7 +1607,7 @@ test "Document.needsPassword returns false for unprotected PDF" {
     var doc = try Document.open(&ctx, test_pdf_path);
     defer doc.deinit();
 
-    try std.testing.expect(!doc.needsPassword());
+    try std.testing.expect(!(try doc.needsPassword()));
 }
 
 test "Document.isPdf returns true for PDF" {
@@ -1658,7 +1677,7 @@ test "Page.bounds returns valid dimensions" {
     var page = try doc.loadPage(0);
     defer page.deinit();
 
-    const bounds = page.bounds();
+    const bounds = try page.bounds();
 
     // Sample PDF has US Letter size (612 x 792 points)
     try std.testing.expectApproxEqAbs(@as(f32, 612.0), bounds.width(), 0.1);
@@ -1675,10 +1694,10 @@ test "Page.width and height match bounds" {
     var page = try doc.loadPage(0);
     defer page.deinit();
 
-    const bounds = page.bounds();
+    const bounds = try page.bounds();
 
-    try std.testing.expectApproxEqAbs(bounds.width(), page.width(), 0.001);
-    try std.testing.expectApproxEqAbs(bounds.height(), page.height(), 0.001);
+    try std.testing.expectApproxEqAbs(bounds.width(), try page.width(), 0.001);
+    try std.testing.expectApproxEqAbs(bounds.height(), try page.height(), 0.001);
 }
 
 test "Page.toPixmap creates valid pixmap" {
@@ -1711,8 +1730,8 @@ test "Pixmap dimensions match page at scale 1.0" {
     defer pixmap.deinit();
 
     // Pixmap dimensions should match page dimensions at scale 1.0
-    const page_width = @as(i32, @intFromFloat(page.width()));
-    const page_height = @as(i32, @intFromFloat(page.height()));
+    const page_width = @as(i32, @intFromFloat(try page.width()));
+    const page_height = @as(i32, @intFromFloat(try page.height()));
 
     try std.testing.expectEqual(page_width, pixmap.width());
     try std.testing.expectEqual(page_height, pixmap.height());
@@ -1732,8 +1751,8 @@ test "Pixmap dimensions scale correctly" {
     var pixmap = try page.toPixmap(2.0, 0.0);
     defer pixmap.deinit();
 
-    const page_width = @as(i32, @intFromFloat(page.width() * 2.0));
-    const page_height = @as(i32, @intFromFloat(page.height() * 2.0));
+    const page_width = @as(i32, @intFromFloat((try page.width()) * 2.0));
+    const page_height = @as(i32, @intFromFloat((try page.height()) * 2.0));
 
     try std.testing.expectEqual(page_width, pixmap.width());
     try std.testing.expectEqual(page_height, pixmap.height());
@@ -1811,7 +1830,7 @@ test "context.openDocument is equivalent to Document.open" {
     var doc = try ctx.openDocument(test_pdf_path);
     defer doc.deinit();
 
-    try std.testing.expectEqual(@as(i32, 2), doc.pageCount());
+    try std.testing.expectEqual(@as(i32, 2), try doc.pageCount());
 }
 
 // ============================================
@@ -2580,11 +2599,11 @@ test "Document.deletePage removes a page" {
     var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
     defer doc.deinit();
 
-    try std.testing.expectEqual(@as(i32, 3), doc.pageCount());
+    try std.testing.expectEqual(@as(i32, 3), try doc.pageCount());
 
     try doc.deletePage(1); // Remove page 2 (0-indexed)
 
-    try std.testing.expectEqual(@as(i32, 2), doc.pageCount());
+    try std.testing.expectEqual(@as(i32, 2), try doc.pageCount());
 }
 
 test "Document.deletePage rejects out of range" {
@@ -2613,11 +2632,11 @@ test "Document.deletePageRange removes multiple pages" {
     var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
     defer doc.deinit();
 
-    try std.testing.expectEqual(@as(i32, 3), doc.pageCount());
+    try std.testing.expectEqual(@as(i32, 3), try doc.pageCount());
 
     try doc.deletePageRange(0, 2); // Remove pages 0 and 1
 
-    try std.testing.expectEqual(@as(i32, 1), doc.pageCount());
+    try std.testing.expectEqual(@as(i32, 1), try doc.pageCount());
 }
 
 test "Document.rearrangePages reorders pages" {
@@ -2631,12 +2650,12 @@ test "Document.rearrangePages reorders pages" {
     var doc = try Document.openFromMemory(&ctx, data, "application/pdf");
     defer doc.deinit();
 
-    try std.testing.expectEqual(@as(i32, 3), doc.pageCount());
+    try std.testing.expectEqual(@as(i32, 3), try doc.pageCount());
 
     // Reverse page order: [2, 1, 0]
     try doc.rearrangePages(&[_]i32{ 2, 1, 0 });
 
-    try std.testing.expectEqual(@as(i32, 3), doc.pageCount());
+    try std.testing.expectEqual(@as(i32, 3), try doc.pageCount());
 }
 
 test "Document.rearrangePages can remove pages" {
@@ -2653,7 +2672,7 @@ test "Document.rearrangePages can remove pages" {
     // Keep only pages 0 and 2
     try doc.rearrangePages(&[_]i32{ 0, 2 });
 
-    try std.testing.expectEqual(@as(i32, 2), doc.pageCount());
+    try std.testing.expectEqual(@as(i32, 2), try doc.pageCount());
 }
 
 test "Document.rearrangePages can duplicate pages" {
@@ -2670,7 +2689,7 @@ test "Document.rearrangePages can duplicate pages" {
     // Duplicate page 0
     try doc.rearrangePages(&[_]i32{ 0, 0, 1, 2 });
 
-    try std.testing.expectEqual(@as(i32, 4), doc.pageCount());
+    try std.testing.expectEqual(@as(i32, 4), try doc.pageCount());
 }
 
 test "Document.insertPageFrom copies page from another document" {
@@ -2688,12 +2707,12 @@ test "Document.insertPageFrom copies page from another document" {
     var dst = try Document.createPdf(&ctx);
     defer dst.deinit();
 
-    try std.testing.expectEqual(@as(i32, 0), dst.pageCount());
+    try std.testing.expectEqual(@as(i32, 0), try dst.pageCount());
 
     // Copy page 0 from source to destination
     try dst.insertPageFrom(-1, &src, 0);
 
-    try std.testing.expectEqual(@as(i32, 1), dst.pageCount());
+    try std.testing.expectEqual(@as(i32, 1), try dst.pageCount());
 }
 
 test "Document.insertPageFrom merges multiple pages" {
@@ -2715,7 +2734,7 @@ test "Document.insertPageFrom merges multiple pages" {
     try dst.insertPageFrom(-1, &src, 1);
     try dst.insertPageFrom(-1, &src, 2);
 
-    try std.testing.expectEqual(@as(i32, 3), dst.pageCount());
+    try std.testing.expectEqual(@as(i32, 3), try dst.pageCount());
 }
 
 test "Document.createPdf creates empty document" {
@@ -2725,7 +2744,7 @@ test "Document.createPdf creates empty document" {
     var doc = try Document.createPdf(&ctx);
     defer doc.deinit();
 
-    try std.testing.expectEqual(@as(i32, 0), doc.pageCount());
+    try std.testing.expectEqual(@as(i32, 0), try doc.pageCount());
     try std.testing.expect(doc.isPdf());
 }
 
@@ -2981,4 +3000,126 @@ test "OutlineItem struct has correct fields" {
     try std.testing.expectEqual(@as(i32, 0), item.page);
     try std.testing.expect(item.is_open);
     try std.testing.expect(!item.has_children);
+}
+
+// ============================================
+// Malformed input regression tests
+//
+// Fixtures are generated by scripts/repro/make_malformed_fixtures.py. Before
+// the fallible shims existed, each of these aborted the whole process via
+// MuPDF's "aborting process from uncaught error!" exit(1).
+// ============================================
+
+test "pageCount returns error for negative /Count instead of aborting" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    var doc = try Document.open(&ctx, "tests/fixtures/malformed_negative_count.pdf");
+    defer doc.deinit();
+
+    try std.testing.expectError(Error.MupdfError, doc.pageCount());
+    try std.testing.expectError(Error.MupdfError, doc.loadPage(0));
+}
+
+test "pageCount returns error for impossible /Count instead of aborting" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    var doc = try Document.open(&ctx, "tests/fixtures/malformed_huge_count.pdf");
+    defer doc.deinit();
+
+    try std.testing.expectError(Error.MupdfError, doc.pageCount());
+    try std.testing.expectError(Error.MupdfError, doc.deletePage(0));
+}
+
+test "Page.bounds returns error for /Parent cycle instead of aborting" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    var doc = try Document.open(&ctx, "tests/fixtures/malformed_parent_cycle.pdf");
+    defer doc.deinit();
+
+    try std.testing.expectEqual(@as(i32, 1), try doc.pageCount());
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+
+    try std.testing.expectError(Error.MupdfError, page.bounds());
+    try std.testing.expectError(Error.MupdfError, page.width());
+    try std.testing.expectError(Error.MupdfError, page.height());
+}
+
+test "Pixmap.savePng returns WriteFailed for unwritable path instead of aborting" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    var doc = try Document.open(&ctx, test_pdf_path);
+    defer doc.deinit();
+    var page = try doc.loadPage(0);
+    defer page.deinit();
+    var pixmap = try page.toPixmap(0.1, 0.0);
+    defer pixmap.deinit();
+
+    try std.testing.expectError(Error.WriteFailed, pixmap.savePng("/nonexistent-dir/zig-mupdf/out.png"));
+}
+
+test "authenticate and needsPassword return values on unencrypted PDF" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    var doc = try Document.open(&ctx, test_pdf_path);
+    defer doc.deinit();
+
+    try std.testing.expect(!(try doc.needsPassword()));
+    try std.testing.expect(try doc.authenticate(""));
+}
+
+test "metadata on broken Info dictionary does not abort" {
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    var doc = try Document.open(&ctx, "tests/fixtures/malformed_broken_info.pdf");
+    defer doc.deinit();
+
+    const allocator = std.testing.allocator;
+    var metadata = try doc.getAllMetadata(allocator);
+    defer metadata.deinit();
+    try doc.setMetadata(.title, "repaired");
+}
+
+test "every malformed fixture survives the full open/count/load/bound/text/render pipeline" {
+    const fixtures = [_][]const u8{
+        "tests/fixtures/malformed_negative_count.pdf",
+        "tests/fixtures/malformed_huge_count.pdf",
+        "tests/fixtures/malformed_parent_cycle.pdf",
+        "tests/fixtures/malformed_broken_info.pdf",
+        "tests/fixtures/malformed_truncated.pdf",
+        "tests/fixtures/malformed_bad_xref.pdf",
+    };
+    const allocator = std.testing.allocator;
+
+    var ctx = try Context.init();
+    defer ctx.deinit();
+
+    for (fixtures) |path| {
+        var doc = Document.open(&ctx, path) catch continue;
+        defer doc.deinit();
+
+        _ = doc.needsPassword() catch {};
+        _ = doc.authenticate("") catch {};
+        var metadata = doc.getAllMetadata(allocator) catch null;
+        if (metadata) |*m| m.deinit();
+
+        const count = doc.pageCount() catch continue;
+        var i: i32 = 0;
+        while (i < count) : (i += 1) {
+            var page = doc.loadPage(i) catch continue;
+            defer page.deinit();
+            _ = page.bounds() catch {};
+            _ = page.rotation();
+            if (page.getText(allocator)) |text| allocator.free(text) else |_| {}
+            var pixmap = page.toPixmap(0.25, 0.0) catch continue;
+            defer pixmap.deinit();
+            if (pixmap.toPng(allocator)) |png| allocator.free(png) else |_| {}
+        }
+    }
 }
