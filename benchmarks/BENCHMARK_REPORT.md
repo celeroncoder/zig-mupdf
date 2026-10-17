@@ -47,7 +47,7 @@ Geometric mean: zig-mupdf is **1.3×** faster (March: 1.2×). The relative pictu
 | /render 2× | 4 | **20.2** | 18.5 | 171.5 / 248.5 / 255.7 | 187.6 / 369.6 / 397.1 |
 | /render 2× | 8 | **19.9** | 17.9 | 348.6 / 488.0 / 499.6 | 386.5 / 599.3 / 721.8 |
 
-* Both servers scale from c=1 to c=2 and then plateau, since 2 vCPUs are saturated. Zig gets 1.85× on `/text` and 1.79× on `/render`; PyMuPDF gets 1.60× and 1.61×.
+* Both servers scale from c=1 to c=2 and then plateau, since 2 vCPUs are saturated. Zig gets 1.85× on `/text` and 1.78× on `/render`; PyMuPDF gets 1.60× on both.
 * Zig's throughput edge is **1.24–1.56× on /text** and **1.09–1.22× on /render**. The gap is per-request overhead (Python HTTP, multipart parsing, ASGI); rendering is engine-bound on both sides.
 * The tail latency gap is larger than the median gap: at c=8 on `/render`, p99 is 500 vs 722 ms.
 * **Where Zig doesn't win:** in a short exploratory run (`-n 16`), PyMuPDF had the *lower* `/render` p50 at c=8 (271 vs 329 ms), though with a much worse p95/p99. The Zig server queues requests strictly FIFO across 2 workers, which evens out latency rather than minimizing the median. In the full run above, Zig won p50 as well, but the medians are within ~10%.
