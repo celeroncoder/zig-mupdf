@@ -8,6 +8,76 @@ The 2-core limit caps how far concurrency can scale; see Issue 2.
 
 **Baseline test suite (unfixed):** `zig build test --summary all` gives `Build Summary: 5/5 steps succeeded; 99/99 tests passed`.
 
+## Summary
+
+| # | Issue | Severity | Repro command | Before | After | Status |
+|---|---|---|---|---|---|---|
+| 1 | Throwing MuPDF calls bypass `fz_try` | HIGH | `scripts/repro/issue1_uncaught_throw.sh 8080`, `scripts/repro/issue1_fuzz.sh 3000 20 <corpus>` | 3/6 crafted PDFs abort `pdf-info`; one 600-byte upload kills the server (exit 1); fuzz: 40/40 runs abort | 0 aborts; server answers 422/500 and stays up; fuzz 150,000 iterations, 0 aborts | ✅ Fixed |
+| 2 | Server strictly single-threaded | HIGH | `scripts/repro/issue2_concurrency.sh 8080` | 16 parallel renders 1.16 s vs 1.26 s serial (1.08×); flat 11.9 req/s render, ~52 req/s text | 0.72 s vs 1.31 s (1.83×); 21.0 req/s render, 104 req/s text at c=2 (2 vCPUs) | ✅ Fixed |
+| 3 | Idle connection blocks server (slowloris) | HIGH | `scripts/repro/issue3_slowloris.sh 8080 8` | `/health` times out with 8 idle sockets; stalled clients never dropped; truncated body parsed as a PDF | `/health` in 0.01 s even with 200 idle sockets; 408/400/431 responses; trickle cut off at the deadline | ✅ Fixed |
+| 4 | Format/font coverage overstated | MEDIUM | `scripts/repro/issue4_formats.sh` | 10/10 formats undocumented; 5 places claim EPUB/HTML | Supported-formats table matches actual behaviour; 0 overclaims; test pins the matrix | ✅ Docs fixed (optional build flags not done) |
+| 5 | Benchmark too narrow | MEDIUM | `scripts/repro/issue5_benchmark_coverage.sh` | 8/8 required measurements missing | Concurrency + engine benchmarks added; report regenerated | ✅ Fixed |
+| 6 | Docs drift | LOW | `scripts/repro/issue6_docs_drift.sh` | 4 stale phases, 3 wrong test counts, zon 0.13.0, 9 undocumented features | All match (109 tests, 0.15.2, flags documented) | ✅ Fixed |
+| 7 | Licence | INFO | `scripts/repro/issue7_license.sh` | No hosted/network or §13 note | Explicit AGPL hosting note in README and server header | ✅ Fixed |
+
+**Tests:** before, `99/99 tests passed`. After, `109/109 tests passed` in both Debug and ReleaseFast (`zig build test --summary all` and `zig build test -Doptimize=ReleaseFast --summary all`).
+
+**Found during verification and fixed:**
+* A cross-thread use-after-free in MuPDF's shared resource store (Issue 3 section). Fixed by purging a PDF's store keys before dropping it; the server now defaults to independent per-worker contexts.
+* Debug builds crashing in upstream MuPDF UBSan findings (Issues 1, 3, 4). `-Dsanitize-mupdf` now defaults to off.
+
+**Not fixed / not reproduced:**
+* No crafted input made `fz_lookup_metadata`, `fz_set_metadata` or `fz_authenticate_password` throw; they are wrapped defensively.
+* Upstream MuPDF UB (UBSan) is not patched.
+* Optional `-Dharfbuzz` / `-Dcjk-fonts` build options were not added.
+* Concurrency scaling could only be measured up to 2 vCPUs.
+* PRD Phase 8 `/merge` and `/split` endpoints are still unimplemented (out of scope).
+
+### Final regression run (all repro scripts on the final ReleaseFast build)
+
+```
+### scripts/repro/issue1_uncaught_throw.sh 8080
+malformed_parent_cycle       /text    http=500 server_alive=yes
+malformed_parent_cycle       /render  http=500 server_alive=yes
+RESULT: PASS
+exit=0
+### scripts/repro/issue1_fuzz.sh 3000 20 tests/fixtures
+seed=19  exit=0 fuzz: completed 3000/3000 iterations in 1.4s, 0 aborts (74543 MuPDF errors/warnings handled)
+seed=20  exit=0 fuzz: completed 3000/3000 iterations in 1.6s, 0 aborts (75749 MuPDF errors/warnings handled)
+TOTAL: seeds=20 iterations_executed=60000 process_aborts=0
+exit=0
+### scripts/repro/issue2_concurrency.sh 8080
+/text         2    64    0    87.75     18.8     32.5     34.2
+/text         4    64    0    83.96     38.4     54.2     60.7
+/text         8    64    0    80.22     74.1     85.0     98.5
+exit=0
+### scripts/repro/issue3_slowloris.sh 8080 8
+server alive: yes
+final /health http=200
+RESULT: PASS
+exit=0
+### scripts/repro/issue4_formats.sh
+-- overclaiming phrases in docs --
+(none)
+RESULT: PASS
+exit=0
+### scripts/repro/issue5_benchmark_coverage.sh
+ok    in-process engine benchmark (PyMuPDF)
+ok    report has machine specs + concurrency
+RESULT: PASS
+exit=0
+### scripts/repro/issue6_docs_drift.sh
+ok     README documents bench-engine
+ok     README documents AGPL
+RESULT: PASS
+exit=0
+### scripts/repro/issue7_license.sh
+ok      commercial licence alternative
+ok      MIT applies only to the wrapper
+RESULT: PASS
+exit=0
+```
+
 ---
 
 ## Issue 1 (HIGH): MuPDF calls bypass the `fz_try` shim, so one throw kills the process
