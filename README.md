@@ -22,6 +22,31 @@ zig build test          # Run 76 tests
 zig build run -- examples/example.pdf   # Run pdf-info example
 ```
 
+## Supported formats
+
+The build compiles a trimmed MuPDF (see the `mupdf_cflags` in `build.zig`):
+
+| Format | Supported | Notes |
+|---|:---:|---|
+| PDF | ✅ | Full read support; write/edit via `save`, pages, annotations, metadata |
+| XPS | ✅ | OpenXPS / XPS |
+| SVG | ✅ | |
+| CBZ | ✅ | Also CBT, ZIP and TAR archives of images (no CBR/RAR) |
+| Images | ✅ | PNG, JPEG, JPEG 2000, TIFF, BMP, GIF, PNM, PSD, JBIG2 (JPEG XR is not available) |
+| EPUB | ❌ | Compiled out (`FZ_ENABLE_EPUB=0`, needs the HTML engine + HarfBuzz) |
+| HTML | ❌ | HTML/XHTML compiled out (`FZ_ENABLE_HTML=0`) |
+| TXT | ❌ | Compiled out (`FZ_ENABLE_TXT=0`) |
+| FB2 | ❌ | FictionBook compiled out (`FZ_ENABLE_FB2=0`); MOBI likewise (`FZ_ENABLE_MOBI=0`) |
+| Office | ❌ | DOCX/XLSX/PPTX/ODT compiled out (`FZ_ENABLE_OFFICE=0`) |
+
+Unsupported formats fail in `Document.open` / `openFromMemory` with `error.OpenFailed`.
+
+Other trimmed features:
+
+- **Fonts:** only the 14 standard PDF fonts (URW Base14 clones) are built in. The Noto fallback fonts and the CJK fonts are compiled out (`-DTOFU -DTOFU_CJK`). PDFs that *embed* their fonts (the common case) render and extract correctly in any script. Text drawn with a **non-embedded** CJK, Arabic, Devanagari or other non-Latin font has no fallback font, so it renders as blank/missing glyphs. Text extraction still returns the Unicode if the PDF maps it.
+- **HarfBuzz text shaping:** not compiled. It is only needed for laying out reflowable formats (HTML/EPUB) and some annotation/form appearance generation, not for rendering existing PDF content.
+- **OCR** (Tesseract/Leptonica) and **JavaScript** (MuJS, PDF form scripts) are compiled out (`FZ_ENABLE_OCR=0`, `FZ_ENABLE_JS=0`).
+
 ## Usage
 
 ```zig
@@ -109,7 +134,7 @@ See [benchmarks/BENCHMARK_REPORT.md](benchmarks/BENCHMARK_REPORT.md) for methodo
 | Type | Description |
 |---|---|
 | `Context` | MuPDF context (one per thread) |
-| `Document` | Opened PDF/XPS/EPUB document |
+| `Document` | Opened document (PDF, XPS, SVG, CBZ, or image; see [Supported formats](#supported-formats)) |
 | `Page` | Single page with render/text/search/images |
 | `Pixmap` | Rendered pixel buffer with PNG export |
 | `Matrix` | 2D affine transformation |

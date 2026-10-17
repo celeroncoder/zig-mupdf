@@ -43,7 +43,7 @@ pub fn main() !void {
     if (doc.isPdf()) {
         std.debug.print("Format: PDF\n", .{});
     } else {
-        std.debug.print("Format: Other (XPS, EPUB, etc.)\n", .{});
+        std.debug.print("Format: Other (XPS, SVG, CBZ or image)\n", .{});
     }
 
     // Page count

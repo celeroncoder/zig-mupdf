@@ -422,3 +422,65 @@ endpoint   conc    ok  err    req/s   p50 ms   p95 ms   p99 ms
 `scripts/repro/issue1_uncaught_throw.sh` still passes. `zig build test --summary all`: `108/108 tests passed`.
 
 **Also found (not fixed: upstream MuPDF):** a Debug build of the server (`zig build run-server` without `-Doptimize`) panics on the shipped `examples/example.pdf` page 1 at scale 2, because UBSan flags a signed overflow in `source/fitz/draw-rasterize.c:251`. ReleaseSafe trap-mode UBSan also trips inside lcms2 (`cmslut.c:1446`, a function-pointer type check). This is the same class as the Issue-1 limitation. Use ReleaseFast for serving, or `-Dsanitize-mupdf=false`.
+
+---
+
+## Issue 4 (MEDIUM): format/font coverage is trimmed, and the README overstates it
+
+### Reproduce
+
+Command: `scripts/repro/issue4_formats.sh`. It writes one tiny sample per format (`scripts/repro/make_format_fixtures.py` → `tests/fixtures/formats/`) and opens each with `pdf-info`. It then checks that README has a matching "Supported formats" row and greps the docs for overclaims.
+
+Before:
+```
+PDF     opens=yes README=missing  MISMATCH
+XPS     opens=yes README=missing  MISMATCH
+SVG     opens=yes README=missing  MISMATCH
+CBZ     opens=yes README=missing  MISMATCH
+Images  opens=yes README=missing  MISMATCH
+EPUB    opens=no  README=missing  MISMATCH
+HTML    opens=no  README=missing  MISMATCH
+TXT     opens=no  README=missing  MISMATCH
+FB2     opens=no  README=missing  MISMATCH
+Office  opens=no  README=missing  MISMATCH
+-- overclaiming phrases in docs --
+README.md:112:| `Document` | Opened PDF/XPS/EPUB document |
+src/context.zig:146:    /// Supported formats: PDF, XPS, EPUB, HTML, and various image formats.
+src/document.zig:3://! Represents an opened document (PDF, XPS, EPUB, etc.).
+src/root.zig:52://! - **Document Loading**: PDF, XPS, EPUB, HTML, and image formats
+examples/pdf_info.zig:46:        std.debug.print("Format: Other (XPS, EPUB, etc.)\n", .{});
+RESULT: FAIL
+```
+EPUB, HTML, TXT, FB2 and Office fail to open, yet README, `root.zig`, `context.zig`, `document.zig` and `pdf_info.zig` all claim EPUB (and sometimes HTML).
+
+### Fix
+
+* README: new **Supported formats** section with a per-format table (PDF, XPS, SVG, CBZ/ZIP/TAR, images ✅; EPUB, HTML, TXT, FB2/MOBI, Office ❌, each with its `FZ_ENABLE_*` flag). It also lists the font limits (Base14 only; Noto and CJK compiled out, so non-embedded CJK or other non-Latin fonts have no fallback), no HarfBuzz, and no OCR or JS.
+* Doc comments in `root.zig`, `context.zig` and `document.zig`, plus the `pdf_info.zig` output, corrected.
+* New test: `compiled-in format matrix matches README Supported formats table`. Supported formats must open with ≥1 page, and unsupported ones must fail with `error.OpenFailed`.
+* **Optional build options (`-Dharfbuzz`, `-Dcjk-fonts`, `-Dhtml`): not done.** HarfBuzz is C++ and would need its own compile unit and flags. CJK/Noto fonts need several MB of generated font C sources (`generated/fonts` only has Base14), and HTML/EPUB need gumbo plus HarfBuzz together. I couldn't add these cleanly, and verified, in this PR without risking the default build.
+
+### Found while re-verifying: Debug builds couldn't open SVG/XPS/CBZ at all
+
+The new format test aborted the Debug test run. UBSan flagged `member access within misaligned address … for type 'fz_xml'` in MuPDF's XML pool allocator (`source/fitz/xml.c:479`), which every SVG and XPS open hits (CBZ recognition hits it too). With this, the shipped `example.pdf` crashing the Debug server (Issue 3), and the fuzz findings (Issue 1), it's clear upstream MuPDF is not UBSan-clean even on ordinary input. **`build.zig` now defaults `-Dsanitize-mupdf` to `false`.** UBSan is off for the vendored C code only. Zig code keeps all its safety checks, and `-Dsanitize-mupdf=true` turns UBSan back on for MuPDF debugging. This supersedes the default described under Issue 1.
+
+### Re-verify
+
+```
+PDF     opens=yes README=yes      ok
+XPS     opens=yes README=yes      ok
+SVG     opens=yes README=yes      ok
+CBZ     opens=yes README=yes      ok
+Images  opens=yes README=yes      ok
+EPUB    opens=no  README=no       ok
+HTML    opens=no  README=no       ok
+TXT     opens=no  README=no       ok
+FB2     opens=no  README=no       ok
+Office  opens=no  README=no       ok
+-- overclaiming phrases in docs --
+(none)
+RESULT: PASS
+```
+Debug build (new default) fuzz: `scripts/repro/issue1_fuzz.sh 3000 5 tests/fixtures` gives `TOTAL: seeds=5 iterations_executed=15000 process_aborts=0`. A Debug server renders `example.pdf` pages 0–3 at scale 2 with `200 200 200 200` (page 1 used to panic).
+
+`zig build test --summary all`: `109/109 tests passed`.

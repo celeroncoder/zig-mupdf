@@ -49,7 +49,8 @@
 //!
 //! ## Features
 //!
-//! - **Document Loading**: PDF, XPS, EPUB, HTML, and image formats
+//! - **Document Loading**: PDF, XPS, SVG, CBZ and image formats (EPUB, MOBI,
+//!   FB2, HTML, TXT and Office are compiled out; see README "Supported formats")
 //! - **Rendering**: High-quality page rendering to pixmaps
 //! - **Text Extraction**: Extract text with position information
 //! - **Metadata**: Access document title, author, and other properties

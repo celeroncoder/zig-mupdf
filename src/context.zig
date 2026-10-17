@@ -143,7 +143,10 @@ pub const Context = struct {
     /// Open a document from a file path.
     ///
     /// The file extension is used to determine the document type.
-    /// Supported formats: PDF, XPS, EPUB, HTML, and various image formats.
+    /// The type is detected from the content and the file extension. Formats
+    /// compiled into this build: PDF, XPS, SVG, CBZ/ZIP/TAR image archives and
+    /// images (PNG, JPEG, JPEG 2000, TIFF, BMP, GIF, PNM, PSD, JBIG2).
+    /// EPUB, MOBI, FB2, HTML/XHTML, TXT and Office formats are NOT compiled in.
     pub fn openDocument(self: *Self, path: []const u8) Error!Document {
         return Document.open(self, path);
     }

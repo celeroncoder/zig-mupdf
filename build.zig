@@ -4,11 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Zig enables UBSan for C code in Debug builds. Upstream MuPDF is not
-    // UBSan-clean (e.g. qsort(NULL, 0) and signed shifts on malformed input),
-    // so a Debug build panics on some hostile PDFs that ReleaseFast handles.
-    // `-Dsanitize-mupdf=false` turns UBSan off for the vendored C code only.
-    const sanitize_mupdf = b.option(bool, "sanitize-mupdf", "Compile vendored MuPDF C code with UBSan (default: Zig's per-optimize-mode default)");
+    // Zig enables UBSan for C code in Debug/ReleaseSafe builds. Upstream MuPDF
+    // is not UBSan-clean: its XML pool allocator does misaligned accesses (any
+    // SVG/XPS/CBZ open panics) and the rasterizer/lexer have signed overflows on
+    // ordinary input. So UBSan is off for the vendored C code by default; Zig
+    // code keeps its safety checks. `-Dsanitize-mupdf=true` turns it back on.
+    const sanitize_mupdf = b.option(bool, "sanitize-mupdf", "Compile vendored MuPDF C code with UBSan (default: false)") orelse false;
 
     // Path to vendored MuPDF
     const mupdf_path: std.Build.LazyPath = b.path(".context/mupdf");
@@ -20,7 +21,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .sanitize_c = if (sanitize_mupdf) |on| (if (on) .full else .off) else null,
+        .sanitize_c = if (sanitize_mupdf) .full else .off,
     });
 
     // ============================================
