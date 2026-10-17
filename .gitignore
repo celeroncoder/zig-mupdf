@@ -31,3 +31,4 @@ benchmarks/results/
 # Rendered test outputs
 *.png
 !/tests/fixtures/*.pdf
+!/tests/fixtures/**/*.png
