@@ -5,6 +5,10 @@
 //!   curl http://localhost:8080/health
 //!   curl -X POST -F "file=@doc.pdf" http://localhost:8080/info
 //!
+//! License: this binary statically links MuPDF (AGPL-3.0). Offering it as a
+//! network service obliges you to provide its complete source to its users
+//! (AGPL section 13) unless you hold an Artifex commercial license.
+//!
 //! Concurrency model: the main thread runs a non-blocking poll() loop that
 //! accepts connections and reads each request in full (with deadlines and size
 //! limits). Only complete requests are pushed to a bounded queue, which a

@@ -638,3 +638,38 @@ ok     README documents bench-engine
 ok     README documents AGPL
 RESULT: PASS
 ```
+
+---
+
+## Issue 7 (INFO): licence
+
+### Reproduce
+
+Command: `scripts/repro/issue7_license.sh`. It checks that README's License section names AGPL-3.0, says that a hosted/network service (the bundled HTTP server) is covered, mentions the §13 source-offer duty and the commercial alternative, and limits MIT to the wrapper.
+
+Before:
+```
+ok      AGPL-3.0 named
+MISSING hosted/network service is covered
+MISSING applies to the bundled HTTP server
+MISSING source must be offered to users (s.13)
+ok      commercial licence alternative
+ok      MIT applies only to the wrapper
+RESULT: FAIL
+```
+
+### Fix
+
+The README License section now has an explicit "Hosting the HTTP server is covered by the AGPL" note: §13 requires offering complete source to network users, or else an Artifex commercial licence. It also states that MIT covers only the wrapper code. `examples/server.zig` has the same note in its header comment. No functional code changed.
+
+### Re-verify
+
+```
+ok      AGPL-3.0 named
+ok      hosted/network service is covered
+ok      applies to the bundled HTTP server
+ok      source must be offered to users (s.13)
+ok      commercial licence alternative
+ok      MIT applies only to the wrapper
+RESULT: PASS
+```

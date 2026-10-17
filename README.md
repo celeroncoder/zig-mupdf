@@ -270,4 +270,6 @@ generated/
 
 ## License
 
-This wrapper is [MIT licensed](LICENSE). MuPDF itself is [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html) or available under a [commercial license](https://mupdf.com/licensing/) from Artifex Software. Binaries linking MuPDF must comply with MuPDF's license.
+The Zig wrapper code in this repository is [MIT licensed](LICENSE). **MuPDF**, which every binary built here statically links, is licensed under the [GNU AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html), or under a [commercial license](https://artifex.com/licensing/) from Artifex Software. The MIT license covers only the wrapper; the combined binaries are bound by MuPDF's terms.
+
+> **Hosting the HTTP server is covered by the AGPL.** If you run `mupdf-server` (or any network service built on this library) for users other than yourself, AGPL-3.0 section 13 requires you to offer those users the complete corresponding source code of the program you run, including your modifications, under the AGPL. If you can't do that (for example, for a closed-source SaaS), you need an Artifex commercial license. This is not legal advice; check MuPDF's licensing page and your own counsel.
