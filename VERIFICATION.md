@@ -575,3 +575,66 @@ Sequential (original `benchmark.py`):
 
   Geometric mean speedup: 1.3x faster (zig-mupdf vs PyMuPDF)
 ```
+
+---
+
+## Issue 6 (LOW): docs drift
+
+### Reproduce
+
+Command: `scripts/repro/issue6_docs_drift.sh`. It compares PROGRESS phase status, every "N tests" figure against the real `zig build test` count, `minimum_zig_version`, and whether README documents the new APIs, flags and build steps.
+
+Before:
+```
+actual test count: 109
+STALE  PROGRESS.md: | Phase 4: Image Extraction | **Next** | - |
+STALE  PROGRESS.md: | Phase 5: PDF Manipulation | Planned | - |
+STALE  PROGRESS.md: | Phase 6: Annotations & Links | Planned | - |
+STALE  PROGRESS.md: | Phase 7: Advanced Features | Planned | - |
+STALE  test count 76: README.md:21:zig build test          # Run 76 tests
+STALE  test count 70: PROGRESS.md:17:**Total tests passing: 70**
+STALE  test count 70: PROGRESS.md:157:zig build test     # Run all tests (70 tests)
+STALE  build.zig.zon minimum_zig_version = "0.13.0" (code needs 0.15)
+MISSING README: initThreadSafe
+MISSING README: --workers
+MISSING README: --read-timeout-ms
+MISSING README: --write-timeout-ms
+MISSING README: --max-header-bytes
+MISSING README: --shared-store
+MISSING README: sanitize-mupdf
+MISSING README: zig build fuzz
+MISSING README: bench-engine
+ok     README documents AGPL
+RESULT: FAIL
+```
+
+### Fix
+
+* `PROGRESS.md`: Phases 4–7 are marked Complete, with summaries. Phase 8 is honestly **Partial**: `/merge` and `/split` from PRD.md are still not implemented. Added a "Verification hardening" entry. The test count is 109.
+* `build.zig.zon`: `minimum_zig_version = "0.15.2"`.
+* `README.md`: test count updated. New sections: **Thread safety** (`init` vs `initThreadSafe` + `clone`, with the shared-store caveat) and **HTTP Server** (flag table with every option and the error status codes). Added build options (`-Dsanitize-mupdf`), `zig build fuzz`, `zig build bench-engine`, the error-union API changes, the new benchmark numbers, and an updated project structure.
+
+### Re-verify
+
+```
+actual test count: 109
+ok     Phase 4: **Complete**
+ok     Phase 5: **Complete**
+ok     Phase 6: **Complete**
+ok     Phase 7: **Complete**
+ok     test count 109: README.md:23:zig build test          # Run 109 tests
+ok     test count 109: PROGRESS.md:18:**Total tests passing: 109** (`zig build test --summary
+ok     test count 109: PROGRESS.md:176:zig build test     # Run all tests (109 tests)
+ok     minimum_zig_version = "0.15.2"
+ok     README documents initThreadSafe
+ok     README documents --workers
+ok     README documents --read-timeout-ms
+ok     README documents --write-timeout-ms
+ok     README documents --max-header-bytes
+ok     README documents --shared-store
+ok     README documents sanitize-mupdf
+ok     README documents zig build fuzz
+ok     README documents bench-engine
+ok     README documents AGPL
+RESULT: PASS
+```
