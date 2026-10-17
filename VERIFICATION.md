@@ -201,3 +201,86 @@ In **Debug** builds, Zig compiles C with UBSan by default. Upstream MuPDF code h
 They are all harmless in practice, and ReleaseFast and ReleaseSmall builds have no UBSan. I didn't patch vendored MuPDF. Debug builds keep UBSan on by default so real memory bugs stay visible; pass `-Dsanitize-mupdf=false` to run a Debug server on untrusted input. Evidence (Debug, default UBSan): `TOTAL: seeds=10 iterations_executed=1725 process_aborts=10`. All 10 aborts are UBSan panics in the MuPDF sources above, and none is an uncaught `fz_throw`.
 
 I couldn't build a fixture that makes `fz_lookup_metadata`, `fz_set_metadata` or `fz_authenticate_password` throw (on the PDF handler they mostly catch internally or only throw on OOM). They are wrapped defensively anyway.
+
+---
+
+## Issue 2 (HIGH): the server is strictly single-threaded
+
+### Reproduce
+
+Command (ReleaseFast build): `scripts/repro/issue2_concurrency.sh 8080`. It times 16 `/render` requests (page 1..16, scale 2) serially vs. all at once (`curl &` + `wait`), then runs a closed-loop load at concurrency 1/2/4/8 (`benchmarks/loadgen.py`).
+
+Before:
+```
+cpus: 2  server args: 8080 
+16x /render scale=2  serial: 1.26s (16 ok)   parallel: 1.16s (16 ok)   speedup: 1.08x
+-- closed-loop load (benchmarks/loadgen.py) --
+endpoint   conc    ok  err    req/s   p50 ms   p95 ms   p99 ms
+/render       1    32    0    11.89     83.4     85.8     86.0
+/render       2    32    0    11.65    165.2    189.2    192.5
+/render       4    32    0    11.66    335.8    348.9    349.8
+/render       8    32    0    11.11    673.9    729.0    730.5
+/text         1    64    0    52.24     18.1     24.5     24.9
+/text         2    64    0    55.44     34.3     40.2     41.5
+/text         4    64    0    55.13     68.7     73.6     75.0
+/text         8    64    0    49.07    141.3    149.4    150.3
+```
+Parallel takes the same time as serial (1.08×). req/s stays flat as concurrency rises, and p50 grows linearly, so requests just queue behind each other.
+
+### Fix
+
+* `src/context.zig`: new `Context.initThreadSafe()` / `initThreadSafeWithStore()`. These install a real `fz_locks_context` backed by `FZ_LOCK_MAX` `std.Thread.Mutex`es, owned by the base context (`Context.locks`) and freed in `deinit`. `clone()` now works on such contexts. New tests: `Context.initThreadSafe allows clone`, plus a 4-thread test in which each thread clones, opens, extracts text, renders and PNG-encodes ×10 and gets identical results.
+* `examples/server.zig`:
+  * The global `fz_context` is gone. `main` creates one lock-enabled base context and **one cloned context per worker**, and handlers receive their worker's context. No context is ever shared between threads.
+  * A fixed worker pool (`--workers N`, default = CPU count) pops accepted connections from a bounded queue (`--queue N`, default 1024). When the queue is full, new connections get `503`.
+  * The allocator is now `std.heap.c_allocator` (thread-safe malloc) instead of a GPA.
+
+### Re-verify
+
+Same command, default workers (= 2 CPUs):
+```
+cpus: 2  server args: 8080 
+  zig-mupdf server on http://localhost:8080 (2 workers)
+16x /render scale=2  serial: 1.31s (16 ok)   parallel: 0.71s (16 ok)   speedup: 1.85x
+-- closed-loop load (benchmarks/loadgen.py) --
+endpoint   conc    ok  err    req/s   p50 ms   p95 ms   p99 ms
+/render       1    32    0    11.78     83.7     88.4     90.9
+/render       2    32    0    19.10     92.9    135.6    163.0
+/render       4    32    0    18.67    198.7    228.3    241.6
+/render       8    32    0    17.92    376.2    436.4    447.3
+/text         1    64    0    52.55     18.1     20.6     28.7
+/text         2    64    0    71.40     24.5     37.4     44.1
+/text         4    64    0    69.93     49.5     60.0     65.6
+/text         8    64    0    63.60     98.8    139.3    143.3
+```
+Control run with `--workers 1` (behaves like the old server, as expected):
+```
+cpus: 2  server args: 8080 --workers 1
+  zig-mupdf server on http://localhost:8080 (1 workers)
+16x /render scale=2  serial: 1.27s (16 ok)   parallel: 1.19s (16 ok)   speedup: 1.07x
+-- closed-loop load (benchmarks/loadgen.py) --
+endpoint   conc    ok  err    req/s   p50 ms   p95 ms   p99 ms
+/render       1    32    0    11.52     84.6     94.3     97.5
+/render       2    32    0    11.90    162.4    177.7    183.5
+/render       4    32    0    11.37    337.6    354.9    355.2
+```
+
+| /render scale=2 | before req/s | after req/s | before p50 / p95 ms | after p50 / p95 ms |
+|---|---:|---:|---:|---:|
+| c=1 | 11.89 | 11.78 | 83.4 / 85.8 | 83.7 / 88.4 |
+| c=2 | 11.65 | **19.10** | 165.2 / 189.2 | **92.9 / 135.6** |
+| c=4 | 11.66 | **18.67** | 335.8 / 348.9 | **198.7 / 228.3** |
+| c=8 | 11.11 | **17.92** | 673.9 / 729.0 | **376.2 / 436.4** |
+
+| /text page 0 | before req/s | after req/s | before p50 / p95 ms | after p50 / p95 ms |
+|---|---:|---:|---:|---:|
+| c=1 | 52.24 | 52.55 | 18.1 / 24.5 | 18.1 / 20.6 |
+| c=2 | 55.44 | **71.40** | 34.3 / 40.2 | **24.5 / 37.4** |
+| c=4 | 55.13 | **69.93** | 68.7 / 73.6 | **49.5 / 60.0** |
+| c=8 | 49.07 | **63.60** | 141.3 / 149.4 | **98.8 / 139.3** |
+
+Throughput now scales with the cores available. This VM has **2 vCPUs**, so the ceiling is about 2×: `/render` gets 1.6–1.85×, which is near-linear. `/text` gets about 1.35×, because each request is only ~18 ms of server work and the Python load generator and curl compete with the server for the same 2 cores. Past c=2 throughput plateaus, as it should when all cores are busy. I couldn't test scaling beyond 2 cores on this machine.
+
+Thread-safety soak (Debug build, safety checks on, `--workers 4`): 120 requests each of `/render`, `/text`, `/search`, `/info` at c=8 gave 0 errors, 0 panics, and the server stayed alive.
+
+`zig build test --summary all`: `108/108 tests passed`.

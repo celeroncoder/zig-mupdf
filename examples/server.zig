@@ -1,26 +1,34 @@
 //! zig-mupdf HTTP Server (optimized)
 //!
 //! Usage:
-//!   zig build run-server -Doptimize=ReleaseFast
+//!   zig build run-server -Doptimize=ReleaseFast -- [port] [--workers N]
 //!   curl http://localhost:8080/health
 //!   curl -X POST -F "file=@doc.pdf" http://localhost:8080/info
+//!
+//! Concurrency model: the main thread accepts connections and pushes them to a
+//! bounded queue; a fixed pool of worker threads (default: one per CPU) pops
+//! and serves them. Each worker owns a `fz_context` cloned from one
+//! lock-enabled base context, so no MuPDF context is ever shared by threads.
 
 const std = @import("std");
 const mupdf = @import("mupdf");
 
-// Use a GPA for better allocation performance than page_allocator
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-const allocator = gpa.allocator();
+// malloc-backed: thread-safe and fast for many concurrent workers
+const allocator = std.heap.c_allocator;
 
-// Global MuPDF context — initialized once, reused across all requests
-var global_ctx: ?mupdf.Context = null;
+const c_lib = @cImport({
+    @cInclude("sys/socket.h");
+    @cInclude("netinet/tcp.h");
+    @cInclude("netinet/in.h");
+});
 
-fn getCtx() *mupdf.Context {
-    if (global_ctx == null) {
-        global_ctx = mupdf.Context.init() catch @panic("Failed to init MuPDF context");
-    }
-    return &global_ctx.?;
-}
+const Config = struct {
+    port: u16 = 8080,
+    /// Worker threads; 0 = one per CPU.
+    workers: usize = 0,
+    /// Accepted connections waiting for a free worker before new ones get 503.
+    queue_capacity: usize = 1024,
+};
 
 // ============================================
 // HTTP Parsing (minimal, fast)
@@ -174,13 +182,12 @@ fn handleHealth(stream: std.net.Stream) void {
     sendJson(stream, "{\"status\":\"ok\",\"service\":\"zig-mupdf\"}");
 }
 
-fn handleInfo(stream: std.net.Stream, form: FormData) void {
+fn handleInfo(ctx: *mupdf.Context, stream: std.net.Stream, form: FormData) void {
     const file_data = form.file_data orelse {
         sendError(stream, "400 Bad Request", "No file uploaded");
         return;
     };
 
-    const ctx = getCtx();
     var doc = mupdf.Document.openFromMemory(ctx, file_data, "application/pdf") catch {
         sendError(stream, "400 Bad Request", "Failed to open PDF");
         return;
@@ -233,9 +240,8 @@ fn handleInfo(stream: std.net.Stream, form: FormData) void {
     sendJson(stream, body);
 }
 
-fn handleText(stream: std.net.Stream, form: FormData) void {
+fn handleText(ctx: *mupdf.Context, stream: std.net.Stream, form: FormData) void {
     const file_data = form.file_data orelse { sendError(stream, "400 Bad Request", "No file"); return; };
-    const ctx = getCtx();
 
     var doc = mupdf.Document.openFromMemory(ctx, file_data, "application/pdf") catch {
         sendError(stream, "400 Bad Request", "Failed to open PDF"); return;
@@ -270,10 +276,9 @@ fn handleText(stream: std.net.Stream, form: FormData) void {
     sendJson(stream, body);
 }
 
-fn handleSearch(stream: std.net.Stream, form: FormData) void {
+fn handleSearch(ctx: *mupdf.Context, stream: std.net.Stream, form: FormData) void {
     const file_data = form.file_data orelse { sendError(stream, "400 Bad Request", "No file"); return; };
     const query = form.query orelse { sendError(stream, "400 Bad Request", "No query"); return; };
-    const ctx = getCtx();
 
     var doc = mupdf.Document.openFromMemory(ctx, file_data, "application/pdf") catch { sendError(stream, "400 Bad Request", "Failed to open PDF"); return; };
     defer doc.deinit();
@@ -306,9 +311,8 @@ fn handleSearch(stream: std.net.Stream, form: FormData) void {
     sendJson(stream, buf[0..len]);
 }
 
-fn handleRender(stream: std.net.Stream, form: FormData) void {
+fn handleRender(ctx: *mupdf.Context, stream: std.net.Stream, form: FormData) void {
     const file_data = form.file_data orelse { sendError(stream, "400 Bad Request", "No file"); return; };
-    const ctx = getCtx();
 
     var timer = std.time.Timer.start() catch unreachable;
 
@@ -350,15 +354,10 @@ fn handleRender(stream: std.net.Stream, form: FormData) void {
 // Connection handler
 // ============================================
 
-fn handleConnection(stream: std.net.Stream) void {
+fn handleConnection(ctx: *mupdf.Context, stream: std.net.Stream) void {
     defer stream.close();
 
     // Set socket options for fast transfer
-    const c_lib = @cImport({
-        @cInclude("sys/socket.h");
-        @cInclude("netinet/tcp.h");
-        @cInclude("netinet/in.h");
-    });
     const fd: c_int = @intCast(stream.handle);
     var nodelay: c_int = 1;
     _ = c_lib.setsockopt(fd, c_lib.IPPROTO_TCP, c_lib.TCP_NODELAY, &nodelay, @sizeOf(c_int));
@@ -435,10 +434,10 @@ fn handleConnection(stream: std.net.Stream) void {
         else
             FormData{ .file_data = if (request.body.len > 0) request.body else null };
 
-        if (std.mem.eql(u8, request.path, "/info")) handleInfo(stream, form)
-        else if (std.mem.eql(u8, request.path, "/text")) handleText(stream, form)
-        else if (std.mem.eql(u8, request.path, "/search")) handleSearch(stream, form)
-        else if (std.mem.eql(u8, request.path, "/render")) handleRender(stream, form)
+        if (std.mem.eql(u8, request.path, "/info")) handleInfo(ctx, stream, form)
+        else if (std.mem.eql(u8, request.path, "/text")) handleText(ctx, stream, form)
+        else if (std.mem.eql(u8, request.path, "/search")) handleSearch(ctx, stream, form)
+        else if (std.mem.eql(u8, request.path, "/render")) handleRender(ctx, stream, form)
         else sendError(stream, "404 Not Found", "Unknown endpoint");
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/")) {
         sendFull(stream, "200 OK", "text/plain",
@@ -457,31 +456,111 @@ fn handleConnection(stream: std.net.Stream) void {
 }
 
 // ============================================
+// Worker pool
+// ============================================
+
+/// Bounded FIFO of accepted connections shared by the acceptor and workers.
+const ConnQueue = struct {
+    mutex: std.Thread.Mutex = .{},
+    not_empty: std.Thread.Condition = .{},
+    items: []std.net.Stream,
+    head: usize = 0,
+    len: usize = 0,
+
+    /// Returns false if the queue is full.
+    fn push(self: *ConnQueue, stream: std.net.Stream) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.len == self.items.len) return false;
+        self.items[(self.head + self.len) % self.items.len] = stream;
+        self.len += 1;
+        self.not_empty.signal();
+        return true;
+    }
+
+    fn pop(self: *ConnQueue) std.net.Stream {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        while (self.len == 0) self.not_empty.wait(&self.mutex);
+        const stream = self.items[self.head];
+        self.head = (self.head + 1) % self.items.len;
+        self.len -= 1;
+        return stream;
+    }
+};
+
+fn workerMain(ctx: *mupdf.Context, queue: *ConnQueue) void {
+    while (true) handleConnection(ctx, queue.pop());
+}
+
+fn parseArgs() !Config {
+    var cfg = Config{};
+    var args = std.process.args();
+    _ = args.skip();
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--workers") or std.mem.eql(u8, arg, "-w")) {
+            cfg.workers = try std.fmt.parseInt(usize, args.next() orelse return error.MissingValue, 10);
+        } else if (std.mem.eql(u8, arg, "--queue")) {
+            cfg.queue_capacity = try std.fmt.parseInt(usize, args.next() orelse return error.MissingValue, 10);
+        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            std.debug.print(
+                \\usage: mupdf-server [port] [--workers N] [--queue N]
+                \\  port         TCP port (default 8080)
+                \\  --workers N  worker threads (default: CPU count)
+                \\  --queue N    max accepted connections waiting for a worker (default 1024)
+                \\
+            , .{});
+            std.process.exit(0);
+        } else {
+            cfg.port = try std.fmt.parseInt(u16, arg, 10);
+        }
+    }
+    if (cfg.workers == 0) cfg.workers = std.Thread.getCpuCount() catch 1;
+    if (cfg.queue_capacity == 0) cfg.queue_capacity = 1;
+    return cfg;
+}
+
+// ============================================
 // Main
 // ============================================
 
 pub fn main() !void {
-    const port: u16 = blk: {
-        var args = std.process.args();
-        _ = args.skip();
-        if (args.next()) |p| break :blk std.fmt.parseInt(u16, p, 10) catch 8080;
-        break :blk 8080;
+    const cfg = parseArgs() catch |err| {
+        std.debug.print("Invalid arguments ({}); see --help\n", .{err});
+        std.process.exit(2);
     };
 
-    // Pre-initialize MuPDF context
-    _ = getCtx();
+    // One lock-enabled base context; every worker gets its own clone.
+    var base_ctx = try mupdf.Context.initThreadSafe();
+    defer base_ctx.deinit();
 
-    const address = std.net.Address.parseIp4("0.0.0.0", port) catch unreachable;
-    var server = address.listen(.{ .reuse_address = true }) catch |err| {
-        std.debug.print("Failed to bind port {d}: {}\n", .{ port, err });
+    const worker_ctxs = try allocator.alloc(mupdf.Context, cfg.workers);
+    defer allocator.free(worker_ctxs);
+    for (worker_ctxs) |*wctx| wctx.* = try base_ctx.clone();
+    defer for (worker_ctxs) |*wctx| wctx.deinit();
+
+    var queue = ConnQueue{ .items = try allocator.alloc(std.net.Stream, cfg.queue_capacity) };
+    defer allocator.free(queue.items);
+
+    const address = std.net.Address.parseIp4("0.0.0.0", cfg.port) catch unreachable;
+    var server = address.listen(.{ .reuse_address = true, .kernel_backlog = 1024 }) catch |err| {
+        std.debug.print("Failed to bind port {d}: {}\n", .{ cfg.port, err });
         return;
     };
     defer server.deinit();
 
-    std.debug.print("\n  zig-mupdf server on http://localhost:{d}\n\n", .{port});
+    for (worker_ctxs) |*wctx| {
+        const t = try std.Thread.spawn(.{}, workerMain, .{ wctx, &queue });
+        t.detach();
+    }
+
+    std.debug.print("\n  zig-mupdf server on http://localhost:{d} ({d} workers)\n\n", .{ cfg.port, cfg.workers });
 
     while (true) {
         const conn = server.accept() catch continue;
-        handleConnection(conn.stream);
+        if (!queue.push(conn.stream)) {
+            sendError(conn.stream, "503 Service Unavailable", "Server busy");
+            conn.stream.close();
+        }
     }
 }

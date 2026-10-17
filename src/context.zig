@@ -5,9 +5,20 @@
 //!
 //! ## Thread Safety
 //!
-//! MuPDF contexts are NOT thread-safe. You should either:
-//! - Use a single context per thread
-//! - Clone the context for each thread using `clone()`
+//! A single MuPDF context must never be used by two threads at once. For
+//! multi-threaded use, create one base context with `initThreadSafe()` (which
+//! installs real mutexes for MuPDF's `FZ_LOCK_MAX` locks) and give every thread
+//! its own `clone()`. Clones share the resource store and font cache. Each
+//! document/page must only be used by the context (thread) that opened it.
+//!
+//! ```zig
+//! var base = try Context.initThreadSafe();
+//! defer base.deinit(); // after all clones are gone
+//!
+//! // per worker thread:
+//! var ctx = try base.clone();
+//! defer ctx.deinit();
+//! ```
 //!
 //! ## Example
 //!
@@ -29,6 +40,9 @@ const Error = @import("error.zig").Error;
 pub const Context = struct {
     /// The underlying MuPDF context pointer.
     ptr: *c.c.fz_context,
+    /// Mutexes backing MuPDF's locking callbacks. Owned by the base context
+    /// created with `initThreadSafe()`; null for clones and single-threaded contexts.
+    locks: ?*Locks = null,
 
     const Self = @This();
 
@@ -40,6 +54,26 @@ pub const Context = struct {
     /// Returns an error if context creation fails (typically due to memory).
     pub fn init() Error!Self {
         return initWithOptions(null, null, default_store_size);
+    }
+
+    /// Initialize a context that can be cloned for use from multiple threads.
+    ///
+    /// Installs a `fz_locks_context` backed by `FZ_LOCK_MAX` mutexes. The
+    /// returned base context owns the mutexes, so it must outlive every clone.
+    pub fn initThreadSafe() Error!Self {
+        return initThreadSafeWithStore(default_store_size);
+    }
+
+    /// Like `initThreadSafe()` with a custom resource store size in bytes.
+    pub fn initThreadSafeWithStore(max_store: usize) Error!Self {
+        const locks = std.heap.c_allocator.create(Locks) catch return Error.OutOfMemory;
+        locks.* = .{};
+        locks.ctx = .{ .user = locks, .lock = Locks.lock, .unlock = Locks.unlock };
+        errdefer std.heap.c_allocator.destroy(locks);
+
+        var self = try initWithOptions(null, &locks.ctx, max_store);
+        self.locks = locks;
+        return self;
     }
 
     /// Initialize a new MuPDF context with custom options.
@@ -72,13 +106,18 @@ pub const Context = struct {
     pub fn deinit(self: *Self) void {
         c.c.fz_drop_context(self.ptr);
         self.ptr = undefined;
+        if (self.locks) |locks| {
+            std.heap.c_allocator.destroy(locks);
+            self.locks = null;
+        }
     }
 
     /// Clone this context for use in another thread.
     ///
     /// The cloned context shares the same store and allocator but has
     /// independent exception handling state, making it safe to use from
-    /// a different thread.
+    /// a different thread. Only works on contexts created with locks
+    /// (`initThreadSafe()`); otherwise returns `ContextCreationFailed`.
     pub fn clone(self: *Self) Error!Self {
         const cloned = c.c.fz_clone_context(self.ptr);
         if (cloned == null) {
@@ -126,6 +165,22 @@ pub const Context = struct {
     }
 };
 
+/// Mutex table handed to MuPDF as its `fz_locks_context`.
+pub const Locks = struct {
+    mutexes: [c.c.FZ_LOCK_MAX]std.Thread.Mutex = [_]std.Thread.Mutex{.{}} ** c.c.FZ_LOCK_MAX,
+    ctx: c.c.fz_locks_context = undefined,
+
+    fn lock(user: ?*anyopaque, index: c_int) callconv(.c) void {
+        const self: *Locks = @ptrCast(@alignCast(user.?));
+        self.mutexes[@intCast(index)].lock();
+    }
+
+    fn unlock(user: ?*anyopaque, index: c_int) callconv(.c) void {
+        const self: *Locks = @ptrCast(@alignCast(user.?));
+        self.mutexes[@intCast(index)].unlock();
+    }
+};
+
 // Forward declaration - Document is defined in document.zig
 const Document = @import("document.zig").Document;
 
@@ -159,6 +214,65 @@ test "Context.clone requires locks to be configured" {
     // Without locks configured, clone should fail
     const result = ctx.clone();
     try std.testing.expectError(Error.ContextCreationFailed, result);
+}
+
+test "Context.initThreadSafe allows clone" {
+    var base = try Context.initThreadSafe();
+    defer base.deinit();
+    try std.testing.expect(base.locks != null);
+
+    var cloned = try base.clone();
+    defer cloned.deinit();
+    try std.testing.expect(cloned.ptr != base.ptr);
+    try std.testing.expect(cloned.locks == null);
+}
+
+test "cloned contexts render and extract text concurrently" {
+    const Worker = struct {
+        fn run(base: *Context, failures: *std.atomic.Value(u32), out_len: *usize) void {
+            var ctx = base.clone() catch {
+                _ = failures.fetchAdd(1, .monotonic);
+                return;
+            };
+            defer ctx.deinit();
+            for (0..10) |_| {
+                work(&ctx, out_len) catch {
+                    _ = failures.fetchAdd(1, .monotonic);
+                };
+            }
+        }
+
+        fn work(ctx: *Context, out_len: *usize) !void {
+            var doc = try Document.open(ctx, "tests/fixtures/text_sample.pdf");
+            defer doc.deinit();
+            var page = try doc.loadPage(0);
+            defer page.deinit();
+            const text = try page.getText(std.heap.c_allocator);
+            defer std.heap.c_allocator.free(text);
+            out_len.* = text.len;
+            var pix = try page.toPixmap(1.0, 0.0);
+            defer pix.deinit();
+            const png = try pix.toPng(std.heap.c_allocator);
+            std.heap.c_allocator.free(png);
+        }
+    };
+
+    var base = try Context.initThreadSafe();
+    defer base.deinit();
+
+    var failures = std.atomic.Value(u32).init(0);
+    var lens = [_]usize{0} ** 4;
+    var threads: [4]std.Thread = undefined;
+    for (&threads, 0..) |*t, i| {
+        t.* = try std.Thread.spawn(.{}, Worker.run, .{ &base, &failures, &lens[i] });
+    }
+    for (threads) |t| t.join();
+
+    try std.testing.expectEqual(@as(u32, 0), failures.load(.monotonic));
+    for (lens) |len| {
+        try std.testing.expect(len > 0);
+        try std.testing.expectEqual(lens[0], len);
+    }
 }
 
 test "Context.raw returns underlying pointer" {
