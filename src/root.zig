@@ -34,12 +34,13 @@
 //!
 //! ## Thread Safety
 //!
-//! MuPDF contexts are NOT thread-safe. For multi-threaded applications,
-//! clone the context for each thread:
+//! A MuPDF context must not be used by two threads at once. For
+//! multi-threaded applications, create a lock-enabled base context and
+//! clone it for each thread (cloning a plain `Context.init()` context fails):
 //!
 //! ```zig
-//! var main_ctx = try mupdf.Context.init();
-//! defer main_ctx.deinit();
+//! var main_ctx = try mupdf.Context.initThreadSafe();
+//! defer main_ctx.deinit(); // after every clone has been deinit'ed
 //!
 //! // In each worker thread:
 //! var thread_ctx = try main_ctx.clone();
@@ -48,7 +49,8 @@
 //!
 //! ## Features
 //!
-//! - **Document Loading**: PDF, XPS, EPUB, HTML, and image formats
+//! - **Document Loading**: PDF, XPS, SVG, CBZ and image formats (EPUB, MOBI,
+//!   FB2, HTML, TXT and Office are compiled out; see README "Supported formats")
 //! - **Rendering**: High-quality page rendering to pixmaps
 //! - **Text Extraction**: Extract text with position information
 //! - **Metadata**: Access document title, author, and other properties

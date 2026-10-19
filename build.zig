@@ -4,6 +4,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Zig enables UBSan for C code in Debug/ReleaseSafe builds. Upstream MuPDF
+    // is not UBSan-clean: its XML pool allocator does misaligned accesses (any
+    // SVG/XPS/CBZ open panics) and the rasterizer/lexer have signed overflows on
+    // ordinary input. So UBSan is off for the vendored C code by default; Zig
+    // code keeps its safety checks. `-Dsanitize-mupdf=true` turns it back on.
+    const sanitize_mupdf = b.option(bool, "sanitize-mupdf", "Compile vendored MuPDF C code with UBSan (default: false)") orelse false;
+
     // Path to vendored MuPDF
     const mupdf_path: std.Build.LazyPath = b.path(".context/mupdf");
 
@@ -14,6 +21,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .sanitize_c = if (sanitize_mupdf) .full else .off,
     });
 
     // ============================================
@@ -892,4 +900,60 @@ pub fn build(b: *std.Build) void {
 
     const run_server_step = b.step("run-server", "Run the zig-mupdf HTTP server");
     run_server_step.dependOn(&run_server.step);
+
+    // ============================================
+    // Fuzz loop executable
+    // ============================================
+    const fuzz_module = b.createModule(.{
+        .root_source_file = b.path("tests/fuzz.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    fuzz_module.addImport("mupdf", mupdf_module);
+
+    const fuzz_exe = b.addExecutable(.{
+        .name = "mupdf-fuzz",
+        .root_module = fuzz_module,
+    });
+
+    b.installArtifact(fuzz_exe);
+
+    const run_fuzz = b.addRunArtifact(fuzz_exe);
+    run_fuzz.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        run_fuzz.addArgs(args);
+    }
+
+    const fuzz_step = b.step("fuzz", "Run the mutation fuzz loop (args: iterations seed corpus_dir)");
+    fuzz_step.dependOn(&run_fuzz.step);
+
+    // ============================================
+    // In-process engine benchmark
+    // ============================================
+    const bench_module = b.createModule(.{
+        .root_source_file = b.path("benchmarks/engine_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    bench_module.addImport("mupdf", mupdf_module);
+
+    const bench_exe = b.addExecutable(.{
+        .name = "mupdf-engine-bench",
+        .root_module = bench_module,
+    });
+
+    b.installArtifact(bench_exe);
+
+    const run_bench = b.addRunArtifact(bench_exe);
+    run_bench.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        run_bench.addArgs(args);
+    }
+
+    const bench_step = b.step("bench-engine", "Run the in-process engine benchmark (args: pdf iterations page)");
+    bench_step.dependOn(&run_bench.step);
 }

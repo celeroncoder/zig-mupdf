@@ -8,13 +8,14 @@
 | Phase 1: Core Document Operations | **Complete** | 25+ |
 | Phase 2: Rendering & Pixmaps | **Complete** (early, in Phase 0) | included above |
 | Phase 3: Text Extraction & Search | **Complete** | 13 |
-| Phase 4: Image Extraction | **Next** | - |
-| Phase 5: PDF Manipulation | Planned | - |
-| Phase 6: Annotations & Links | Planned | - |
-| Phase 7: Advanced Features | Planned | - |
-| Phase 8: PDF Processing Server | Planned | - |
+| Phase 4: Image Extraction | **Complete** | included in total |
+| Phase 5: PDF Manipulation | **Complete** | included in total |
+| Phase 6: Annotations & Links | **Complete** | included in total |
+| Phase 7: Advanced Features (TOC, forms) | **Complete** | included in total |
+| Phase 8: PDF Processing Server | **Partial**: `/health`, `/info`, `/text`, `/search`, `/render` done (multi-threaded, hardened); `/merge`, `/split` not implemented | - |
+| Verification hardening (see `VERIFICATION.md`) | **Complete** | 10 new |
 
-**Total tests passing: 70**
+**Total tests passing: 109** (`zig build test --summary all`)
 
 ---
 
@@ -105,21 +106,39 @@ Rendering was implemented during Phase 0:
 
 ---
 
-## What's Next: Phase 4 — Image Extraction
+### Phase 4: Image Extraction
 
-Per PRD.md, Phase 4 covers:
+- `Page.getImages()` → `[]ImageInfo` (xref, size, bpc, components, colorspace, filter, name)
+- `Page.loadImage(xref)` → `Image`, `Image.toPixmap()` for decoding/PNG export
 
-1. **List images on a page** — enumerate embedded images with metadata
-2. **Extract image by reference** — get raw image data by xref
-3. **Image metadata** — dimensions, colorspace, bits per component
+### Phase 5: PDF Manipulation
 
-**Key MuPDF functions to wrap:**
-- `pdf_page_obj_transform()` — get image transforms on page
-- `fz_image` struct — image dimensions, colorspace
-- `fz_get_pixmap_from_image()` — convert image to pixmap
-- `pdf_dict_get(page_obj, PDF_NAME(Resources))` → XObject images
+- `Document.deletePage()`, `deletePageRange()`, `insertPageFrom()` (merge), `rearrangePages()`
+- `Document.createPdf()` for new empty PDFs
 
----
+### Phase 6: Annotations
+
+- `Page.getAnnotations()` iterator, `Page.createAnnotation(type)`
+- `Annotation` getters/setters (type, rect, contents, author, color, opacity, quad points), `update()`, `delete()`
+
+### Phase 7: Advanced Features
+
+- `Document.loadOutline()` → `Outline.toList()` (TOC entries with depth/page/URI)
+- `Page.getWidgets()` → form field type, label, value, read-only flag, rect
+
+### Verification hardening
+
+See `VERIFICATION.md` for repro commands and before/after evidence:
+
+- Every throwing MuPDF call now goes through an `fz_try` shim. `pageCount()`, `needsPassword()`, `authenticate()`, `Page.bounds()`, `width()` and `height()` return error unions.
+- `Context.initThreadSafe()` (mutex-backed `fz_locks_context`), so `clone()` works.
+- The server uses a worker pool, a poll-based request reader with timeouts and size limits, and per-worker contexts.
+- Mutation fuzz loop (`zig build fuzz`), engine benchmark (`zig build bench-engine`), concurrency benchmark.
+- `-Dsanitize-mupdf` build option (default off).
+
+### Phase 8 (remaining)
+
+- `/merge` and `/split` endpoints from PRD.md are not implemented yet.
 
 ## Project Structure
 
@@ -154,6 +173,6 @@ zig-mupdf/
 
 ```bash
 zig build          # Build the library
-zig build test     # Run all tests (70 tests)
+zig build test     # Run all tests (109 tests)
 zig build run-pdf-info -- path/to/file.pdf  # Run example
 ```

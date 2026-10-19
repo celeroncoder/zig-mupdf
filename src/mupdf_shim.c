@@ -10,6 +10,9 @@
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
 
+/* Must match mupdf_shim.h */
+#define MUPDF_SHIM_METADATA_ERROR (-2)
+
 /* Image info struct (must match mupdf_shim.h) */
 typedef struct {
     int xref;
@@ -113,6 +116,107 @@ fz_document *mupdf_shim_open_document_with_buffer(fz_context *ctx, const char *m
     return doc;
 }
 
+void mupdf_shim_drop_document(fz_context *ctx, fz_document *doc)
+{
+    pdf_document *pdf = pdf_specifics(ctx, doc);
+    if (pdf)
+    {
+        fz_try(ctx)
+        {
+            pdf_empty_store(ctx, pdf);
+        }
+        fz_catch(ctx)
+        {
+            /* Nothing to undo; fz_drop_document empties the store again. */
+        }
+    }
+    fz_drop_document(ctx, doc);
+}
+
+int mupdf_shim_register_document_handlers(fz_context *ctx)
+{
+    int result = 0;
+    fz_try(ctx)
+    {
+        fz_register_document_handlers(ctx);
+    }
+    fz_catch(ctx)
+    {
+        result = -1;
+    }
+    return result;
+}
+
+int mupdf_shim_count_pages(fz_context *ctx, fz_document *doc)
+{
+    int count = -1;
+    fz_try(ctx)
+    {
+        count = fz_count_pages(ctx, doc);
+    }
+    fz_catch(ctx)
+    {
+        count = -1;
+    }
+    return count;
+}
+
+int mupdf_shim_needs_password(fz_context *ctx, fz_document *doc)
+{
+    int result = -1;
+    fz_try(ctx)
+    {
+        result = fz_needs_password(ctx, doc) ? 1 : 0;
+    }
+    fz_catch(ctx)
+    {
+        result = -1;
+    }
+    return result;
+}
+
+int mupdf_shim_authenticate_password(fz_context *ctx, fz_document *doc, const char *password)
+{
+    int result = -1;
+    fz_try(ctx)
+    {
+        result = fz_authenticate_password(ctx, doc, password);
+    }
+    fz_catch(ctx)
+    {
+        result = -1;
+    }
+    return result;
+}
+
+int mupdf_shim_lookup_metadata(fz_context *ctx, fz_document *doc, const char *key, char *buf, size_t size)
+{
+    int result = -1;
+    fz_try(ctx)
+    {
+        result = fz_lookup_metadata(ctx, doc, key, buf, size);
+    }
+    fz_catch(ctx)
+    {
+        result = MUPDF_SHIM_METADATA_ERROR;
+    }
+    return result;
+}
+
+int mupdf_shim_set_metadata(fz_context *ctx, fz_document *doc, const char *key, const char *value)
+{
+    int result = 0;
+    fz_try(ctx)
+    {
+        fz_set_metadata(ctx, doc, key, value);
+    }
+    fz_catch(ctx)
+    {
+        result = -1;
+    }
+    return result;
+}
+
 fz_page *mupdf_shim_load_page(fz_context *ctx, fz_document *doc, int page_num)
 {
     fz_page *page = NULL;
@@ -125,6 +229,21 @@ fz_page *mupdf_shim_load_page(fz_context *ctx, fz_document *doc, int page_num)
         page = NULL;
     }
     return page;
+}
+
+int mupdf_shim_bound_page(fz_context *ctx, fz_page *page, fz_rect *out)
+{
+    int result = 0;
+    fz_try(ctx)
+    {
+        *out = fz_bound_page(ctx, page);
+    }
+    fz_catch(ctx)
+    {
+        *out = fz_empty_rect;
+        result = -1;
+    }
+    return result;
 }
 
 fz_pixmap *mupdf_shim_new_pixmap_from_page(fz_context *ctx, fz_page *page, fz_matrix ctm, fz_colorspace *cs, int alpha)
@@ -331,6 +450,20 @@ fz_pixmap *mupdf_shim_image_to_pixmap(fz_context *ctx, fz_image *image)
         pix = NULL;
     }
     return pix;
+}
+
+int mupdf_shim_save_pixmap_as_png(fz_context *ctx, fz_pixmap *pixmap, const char *filename)
+{
+    int result = 0;
+    fz_try(ctx)
+    {
+        fz_save_pixmap_as_png(ctx, pixmap, filename);
+    }
+    fz_catch(ctx)
+    {
+        result = -1;
+    }
+    return result;
 }
 
 fz_buffer *mupdf_shim_pixmap_to_png(fz_context *ctx, fz_pixmap *pixmap)
